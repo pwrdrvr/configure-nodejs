@@ -52,7 +52,7 @@ steps:
 | Input | Default | Description |
 | --- | --- | --- |
 | `node-version` | `22.x` | Node.js version to install with `actions/setup-node` |
-| `package-manager` | `""` | Explicit override for `npm`, `pnpm`, or `yarn` |
+| `package-manager` | `""` | Optional override for `npm`, `pnpm`, or `yarn`; by default the action follows the package manager inferred from `package.json` and the lockfile present |
 | `working-directory` | `"."` | Repository-relative directory containing `package.json` and the lockfile |
 | `cache-key-suffix` | `""` | Optional suffix appended to the dependency cache key when you want to namespace cache entries |
 | `lookup-only` | `"false"` | When `true`, only checks whether the cache exists and skips downloading it |
@@ -100,19 +100,15 @@ The first release targets Yarn repositories that install into `node_modules`.
 
 - Yarn 2+ uses `yarn install --immutable`
 - Yarn 1 uses `yarn install --frozen-lockfile`
-- the fixture coverage in this repository uses Yarn 4 with `nodeLinker: node-modules`
+- the dogfood coverage in `pwrdrvr/configure-nodejs-test` uses Yarn 4 with `nodeLinker: node-modules`
 
 Plug'n'Play-specific caching is intentionally out of scope for `v1`.
 
 ## Development
 
-This repository includes three end-to-end fixtures under `fixtures/`:
+Dogfood coverage for this action lives in [`pwrdrvr/configure-nodejs-test`](https://github.com/pwrdrvr/configure-nodejs-test).
 
-- `fixtures/npm-basic`
-- `fixtures/pnpm-basic`
-- `fixtures/yarn-basic`
-
-The CI workflow runs local unit tests plus end-to-end matrix coverage for those fixtures, followed by cache-lookup verification in a second matrix job.
+That repository checks out `pwrdrvr/configure-nodejs` at a configurable ref, runs the unit tests for the helper scripts, and exercises npm, pnpm, and Yarn fixtures through the action entrypoint.
 
 ## Releases
 

@@ -6,7 +6,7 @@ inputs:
     description: "Node.js version to install"
     default: "22.x"
   package-manager:
-    description: "Explicit package manager override (npm, yarn, pnpm)"
+    description: "Optional override for npm, yarn, or pnpm; defaults to the package manager inferred from package.json and lockfiles"
     default: ""
   working-directory:
     description: "Repository-relative directory containing package.json and lockfile"
@@ -84,7 +84,7 @@ runs:
 
     - name: Restore dependencies from cache
       id: cache-node-modules
-      uses: actions/cache@v5
+      uses: actions/cache/restore@v5
       with:
         path: ${{ steps.resolve-cache-paths.outputs.cachePaths }}
         key: node-modules-${{ inputs.node-version }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.resolve-cache-paths.outputs.workingDirectoryKey }}-${{ steps.resolve-package-manager.outputs.managerCacheKey }}-${{ steps.resolve-package-manager.outputs.lockfileSha }}${{ steps.resolve-cache-paths.outputs.cacheKeySuffixSegment }}
@@ -95,3 +95,22 @@ runs:
       shell: bash
       working-directory: ${{ steps.resolve-cache-paths.outputs.workingDirectory }}
       run: ${{ steps.resolve-package-manager.outputs.installCommand }}
+
+    - name: Detect cacheable dependency paths
+      id: detect-cache-paths
+      if: steps.cache-node-modules.outputs.cache-hit != 'true'
+      shell: bash
+      working-directory: ${{ steps.resolve-cache-paths.outputs.workingDirectory }}
+      run: |
+        if find . -type d -name node_modules -print -quit | grep -q .; then
+          echo "exists=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "exists=false" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Save dependencies to cache
+      if: steps.cache-node-modules.outputs.cache-hit != 'true' && steps.detect-cache-paths.outputs.exists == 'true'
+      uses: actions/cache/save@v5
+      with:
+        path: ${{ steps.resolve-cache-paths.outputs.cachePaths }}
+        key: node-modules-${{ inputs.node-version }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.resolve-cache-paths.outputs.workingDirectoryKey }}-${{ steps.resolve-package-manager.outputs.managerCacheKey }}-${{ steps.resolve-package-manager.outputs.lockfileSha }}${{ steps.resolve-cache-paths.outputs.cacheKeySuffixSegment }}
