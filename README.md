@@ -54,6 +54,7 @@ steps:
 | `node-version` | `22.x` | Node.js version to install with `actions/setup-node` |
 | `package-manager` | `""` | Explicit override for `npm`, `pnpm`, or `yarn` |
 | `working-directory` | `"."` | Repository-relative directory containing `package.json` and the lockfile |
+| `cache-key-suffix` | `""` | Optional suffix appended to the dependency cache key when you want to namespace cache entries |
 | `lookup-only` | `"false"` | When `true`, only checks whether the cache exists and skips downloading it |
 
 ## Outputs

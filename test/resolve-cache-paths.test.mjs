@@ -8,6 +8,7 @@ import {
   buildCachePaths,
   buildResult,
   buildWorkingDirectoryKey,
+  normalizeCacheKeySuffix,
   resolveWorkingDirectory,
 } from '../scripts/resolve-cache-paths.mjs';
 
@@ -67,6 +68,12 @@ test('buildWorkingDirectoryKey generates a stable root key and nested slug', () 
   );
 });
 
+test('normalizeCacheKeySuffix preserves safe values and normalizes separators', () => {
+  assert.equal(normalizeCacheKeySuffix('fixture-tests'), 'fixture-tests');
+  assert.equal(normalizeCacheKeySuffix(' fixture tests / ci '), 'fixture-tests-ci');
+  assert.equal(normalizeCacheKeySuffix('   '), '');
+});
+
 test('buildCachePaths scopes cache globs to the resolved working directory', () => {
   assert.deepEqual(buildCachePaths('.'), [
     'node_modules',
@@ -90,10 +97,13 @@ test('buildResult combines normalized working-directory and cache metadata', () 
     const result = buildResult({
       cwd: tempDir,
       workingDirectory: 'fixtures/npm-basic',
+      cacheKeySuffix: 'fixture tests',
     });
 
     assert.equal(result.workingDirectory, 'fixtures/npm-basic');
     assert.match(result.workingDirectoryKey, /^fixtures__npm-basic-[a-f0-9]{8}$/);
     assert.equal(result.cachePaths[0], 'fixtures/npm-basic/node_modules');
+    assert.equal(result.cacheKeySuffix, 'fixture-tests');
+    assert.equal(result.cacheKeySuffixSegment, '-fixture-tests');
   });
 });

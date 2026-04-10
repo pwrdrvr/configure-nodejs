@@ -13,10 +13,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: actions/setup-node@v6
+      - uses: ./
         with:
           node-version: 22.x
-          package-manager-cache: false
 
       - name: Run unit tests
         run: npm test
@@ -55,6 +54,7 @@ jobs:
         uses: ./
         with:
           working-directory: ${{ matrix.fixture }}
+          cache-key-suffix: fixture-tests
           lookup-only: "true"
 
       - name: Assert resolved action outputs
@@ -110,6 +110,7 @@ jobs:
         uses: ./
         with:
           working-directory: ${{ matrix.fixture }}
+          cache-key-suffix: fixture-tests
 
       - name: Assert restore behavior
         shell: bash

@@ -11,6 +11,9 @@ inputs:
   working-directory:
     description: "Repository-relative directory containing package.json and lockfile"
     default: "."
+  cache-key-suffix:
+    description: "Optional suffix appended to the dependency cache key for namespacing"
+    default: ""
   lookup-only:
     description: "If true, only checks if the dependency cache exists and skips download. Does not change save cache behavior"
     default: "false"
@@ -62,6 +65,7 @@ runs:
         node "$GITHUB_ACTION_PATH/scripts/resolve-cache-paths.mjs" \
           --cwd "$GITHUB_WORKSPACE" \
           --working-directory "${{ inputs.working-directory }}" \
+          --cache-key-suffix "${{ inputs.cache-key-suffix }}" \
           --github-output "$GITHUB_OUTPUT"
 
     - name: Resolve package manager
@@ -83,7 +87,7 @@ runs:
       uses: actions/cache@v5
       with:
         path: ${{ steps.resolve-cache-paths.outputs.cachePaths }}
-        key: node-modules-${{ inputs.node-version }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.resolve-cache-paths.outputs.workingDirectoryKey }}-${{ steps.resolve-package-manager.outputs.managerCacheKey }}-${{ steps.resolve-package-manager.outputs.lockfileSha }}
+        key: node-modules-${{ inputs.node-version }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.resolve-cache-paths.outputs.workingDirectoryKey }}-${{ steps.resolve-package-manager.outputs.managerCacheKey }}-${{ steps.resolve-package-manager.outputs.lockfileSha }}${{ steps.resolve-cache-paths.outputs.cacheKeySuffixSegment }}
         lookup-only: ${{ inputs.lookup-only }}
 
     - name: Install dependencies

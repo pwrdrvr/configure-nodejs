@@ -7,6 +7,7 @@ export function parseArgs(argv) {
   const args = {
     cwd: process.cwd(),
     workingDirectory: '.',
+    cacheKeySuffix: '',
     githubOutput: process.env.GITHUB_OUTPUT ?? '',
   };
 
@@ -18,6 +19,9 @@ export function parseArgs(argv) {
       index += 1;
     } else if (arg === '--working-directory') {
       args.workingDirectory = argv[index + 1] ?? '.';
+      index += 1;
+    } else if (arg === '--cache-key-suffix') {
+      args.cacheKeySuffix = argv[index + 1] ?? '';
       index += 1;
     } else if (arg === '--github-output') {
       args.githubOutput = argv[index + 1] ?? '';
@@ -76,6 +80,15 @@ export function buildWorkingDirectoryKey(workingDirectory) {
   return `${slug}-${digest}`;
 }
 
+export function normalizeCacheKeySuffix(cacheKeySuffix) {
+  const normalized = cacheKeySuffix.trim();
+  if (normalized === '') {
+    return '';
+  }
+
+  return normalized.replace(/[^A-Za-z0-9_.-]+/g, '-');
+}
+
 export function buildCachePaths(workingDirectory) {
   const base = workingDirectory === '.' ? '' : `${workingDirectory}/`;
   return [
@@ -86,8 +99,9 @@ export function buildCachePaths(workingDirectory) {
   ];
 }
 
-export function buildResult({ cwd, workingDirectory }) {
+export function buildResult({ cwd, workingDirectory, cacheKeySuffix = '' }) {
   const resolvedWorkingDirectory = resolveWorkingDirectory(cwd, workingDirectory);
+  const normalizedCacheKeySuffix = normalizeCacheKeySuffix(cacheKeySuffix);
 
   return {
     absoluteWorkingDirectory: resolvedWorkingDirectory.absoluteWorkingDirectory,
@@ -96,6 +110,9 @@ export function buildResult({ cwd, workingDirectory }) {
       resolvedWorkingDirectory.workingDirectory,
     ),
     cachePaths: buildCachePaths(resolvedWorkingDirectory.workingDirectory),
+    cacheKeySuffix: normalizedCacheKeySuffix,
+    cacheKeySuffixSegment:
+      normalizedCacheKeySuffix === '' ? '' : `-${normalizedCacheKeySuffix}`,
   };
 }
 
@@ -122,6 +139,7 @@ export function main(argv = process.argv.slice(2)) {
   const result = buildResult({
     cwd: args.cwd,
     workingDirectory: args.workingDirectory,
+    cacheKeySuffix: args.cacheKeySuffix,
   });
 
   writeGithubOutput(args.githubOutput, result);
