@@ -1,0 +1,8 @@
+{
+  "name": "@pwrdrvr/configure-nodejs-action",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test"
+  }
+}
