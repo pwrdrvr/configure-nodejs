@@ -5,4 +5,3 @@ if (typeof pc.green !== 'function') {
 }
 
 console.log(pc.green('npm fixture dependency loaded'));
-

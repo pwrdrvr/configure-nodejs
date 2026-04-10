@@ -96,4 +96,3 @@ jobs:
           test "${{ steps.configure-nodejs.outputs.install-command }}" = "${{ matrix.install-command }}"
           test "${{ steps.configure-nodejs.outputs.working-directory }}" = "${{ matrix.fixture }}"
           test "${{ steps.configure-nodejs.outputs.cache-hit }}" = "true"
-
