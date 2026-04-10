@@ -1,9 +1,0 @@
-{
-  "name": "yarn-basic-fixture",
-  "private": true,
-  "type": "module",
-  "packageManager": "yarn@4.6.0",
-  "dependencies": {
-    "picocolors": "1.1.1"
-  }
-}

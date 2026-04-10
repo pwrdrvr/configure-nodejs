@@ -100,19 +100,15 @@ The first release targets Yarn repositories that install into `node_modules`.
 
 - Yarn 2+ uses `yarn install --immutable`
 - Yarn 1 uses `yarn install --frozen-lockfile`
-- the fixture coverage in this repository uses Yarn 4 with `nodeLinker: node-modules`
+- the dogfood coverage in `pwrdrvr/configure-nodejs-test` uses Yarn 4 with `nodeLinker: node-modules`
 
 Plug'n'Play-specific caching is intentionally out of scope for `v1`.
 
 ## Development
 
-This repository includes three end-to-end fixtures under `fixtures/`:
+Dogfood coverage for this action lives in [`pwrdrvr/configure-nodejs-test`](https://github.com/pwrdrvr/configure-nodejs-test).
 
-- `fixtures/npm-basic`
-- `fixtures/pnpm-basic`
-- `fixtures/yarn-basic`
-
-The CI workflow runs local unit tests plus end-to-end matrix coverage for those fixtures, followed by cache-lookup verification in a second matrix job.
+That repository checks out `pwrdrvr/configure-nodejs` at a configurable ref, runs the unit tests for the helper scripts, and exercises npm, pnpm, and Yarn fixtures through the action entrypoint.
 
 ## Releases
 

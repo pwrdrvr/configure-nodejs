@@ -1,7 +1,1 @@
-node_modules/
 .DS_Store
-
-fixtures/*/node_modules/
-fixtures/*/.pnp.*
-fixtures/*/.yarn/install-state.gz
-fixtures/*/.yarn/cache/
