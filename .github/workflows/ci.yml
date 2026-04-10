@@ -21,8 +21,8 @@ jobs:
       - name: Run unit tests
         run: npm test
 
-  fixture-install:
-    name: Fixture Install (${{ matrix.package-manager }})
+  fixture-lookup:
+    name: Fixture Lookup (${{ matrix.package-manager }})
     needs: unit
     runs-on: ubuntu-latest
     strategy:
@@ -32,21 +32,30 @@ jobs:
           - package-manager: npm
             fixture: fixtures/npm-basic
             install-command: npm ci
+            lockfile-name: package-lock.json
           - package-manager: pnpm
             fixture: fixtures/pnpm-basic
             install-command: pnpm install --frozen-lockfile
+            lockfile-name: pnpm-lock.yaml
           - package-manager: yarn
             fixture: fixtures/yarn-basic
             install-command: yarn install --immutable
+            lockfile-name: yarn.lock
     steps:
       - uses: actions/checkout@v6
+        with:
+          sparse-checkout: |
+            action.yml
+            scripts
+            ${{ matrix.fixture }}
+          sparse-checkout-cone-mode: false
 
       - name: Configure Node.js
         id: configure-nodejs
         uses: ./
         with:
-          node-version: 22.x
           working-directory: ${{ matrix.fixture }}
+          lookup-only: "true"
 
       - name: Assert resolved action outputs
         shell: bash
@@ -54,15 +63,15 @@ jobs:
           test "${{ steps.configure-nodejs.outputs.package-manager }}" = "${{ matrix.package-manager }}"
           test "${{ steps.configure-nodejs.outputs.install-command }}" = "${{ matrix.install-command }}"
           test "${{ steps.configure-nodejs.outputs.working-directory }}" = "${{ matrix.fixture }}"
-          test -n "${{ steps.configure-nodejs.outputs.lockfile-path }}"
+          test "${{ steps.configure-nodejs.outputs.lockfile-name }}" = "${{ matrix.lockfile-name }}"
 
       - name: Validate installed dependency
         working-directory: ${{ matrix.fixture }}
         run: node check.mjs
 
-  fixture-cache-lookup:
-    name: Fixture Cache Lookup (${{ matrix.package-manager }})
-    needs: fixture-install
+  fixture-validate:
+    name: Fixture Validate (${{ matrix.package-manager }})
+    needs: fixture-lookup
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -71,27 +80,39 @@ jobs:
           - package-manager: npm
             fixture: fixtures/npm-basic
             install-command: npm ci
+            lockfile-name: package-lock.json
           - package-manager: pnpm
             fixture: fixtures/pnpm-basic
             install-command: pnpm install --frozen-lockfile
+            lockfile-name: pnpm-lock.yaml
           - package-manager: yarn
             fixture: fixtures/yarn-basic
             install-command: yarn install --immutable
+            lockfile-name: yarn.lock
     steps:
       - uses: actions/checkout@v6
+        with:
+          sparse-checkout: |
+            action.yml
+            scripts
+            ${{ matrix.fixture }}
+          sparse-checkout-cone-mode: false
 
-      - name: Lookup dependency cache
+      - name: Configure Node.js
         id: configure-nodejs
         uses: ./
         with:
-          node-version: 22.x
           working-directory: ${{ matrix.fixture }}
-          lookup-only: "true"
 
-      - name: Assert cache lookup result
+      - name: Assert restore behavior
         shell: bash
         run: |
           test "${{ steps.configure-nodejs.outputs.package-manager }}" = "${{ matrix.package-manager }}"
           test "${{ steps.configure-nodejs.outputs.install-command }}" = "${{ matrix.install-command }}"
           test "${{ steps.configure-nodejs.outputs.working-directory }}" = "${{ matrix.fixture }}"
+          test "${{ steps.configure-nodejs.outputs.lockfile-name }}" = "${{ matrix.lockfile-name }}"
           test "${{ steps.configure-nodejs.outputs.cache-hit }}" = "true"
+
+      - name: Validate installed dependency
+        working-directory: ${{ matrix.fixture }}
+        run: node check.mjs
