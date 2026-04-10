@@ -7,13 +7,27 @@ on:
   pull_request:
 
 jobs:
-  unit:
-    name: Unit Tests
+  install-deps:
+    name: Install Deps
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
 
-      - uses: ./
+      - name: Configure Node.js
+        uses: ./
+        with:
+          node-version: 22.x
+          lookup-only: "true"
+
+  unit:
+    name: Unit Tests
+    needs: install-deps
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Configure Node.js
+        uses: ./
         with:
           node-version: 22.x
 
