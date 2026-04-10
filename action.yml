@@ -6,7 +6,7 @@ inputs:
     description: "Node.js version to install"
     default: "22.x"
   package-manager:
-    description: "Explicit package manager override (npm, yarn, pnpm)"
+    description: "Optional override for npm, yarn, or pnpm; defaults to the package manager inferred from package.json and lockfiles"
     default: ""
   working-directory:
     description: "Repository-relative directory containing package.json and lockfile"

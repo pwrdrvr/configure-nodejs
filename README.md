@@ -52,7 +52,7 @@ steps:
 | Input | Default | Description |
 | --- | --- | --- |
 | `node-version` | `22.x` | Node.js version to install with `actions/setup-node` |
-| `package-manager` | `""` | Explicit override for `npm`, `pnpm`, or `yarn` |
+| `package-manager` | `""` | Optional override for `npm`, `pnpm`, or `yarn`; by default the action follows the package manager inferred from `package.json` and the lockfile present |
 | `working-directory` | `"."` | Repository-relative directory containing `package.json` and the lockfile |
 | `cache-key-suffix` | `""` | Optional suffix appended to the dependency cache key when you want to namespace cache entries |
 | `lookup-only` | `"false"` | When `true`, only checks whether the cache exists and skips downloading it |
