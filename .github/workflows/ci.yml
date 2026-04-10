@@ -1,0 +1,99 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - codex/**
+  pull_request:
+
+jobs:
+  unit:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22.x
+          package-manager-cache: false
+
+      - name: Run unit tests
+        run: npm test
+
+  fixture-install:
+    name: Fixture Install (${{ matrix.package-manager }})
+    needs: unit
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - package-manager: npm
+            fixture: fixtures/npm-basic
+            install-command: npm ci
+          - package-manager: pnpm
+            fixture: fixtures/pnpm-basic
+            install-command: pnpm install --frozen-lockfile
+          - package-manager: yarn
+            fixture: fixtures/yarn-basic
+            install-command: yarn install --immutable
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Configure Node.js
+        id: configure-nodejs
+        uses: ./
+        with:
+          node-version: 22.x
+          working-directory: ${{ matrix.fixture }}
+
+      - name: Assert resolved action outputs
+        shell: bash
+        run: |
+          test "${{ steps.configure-nodejs.outputs.package-manager }}" = "${{ matrix.package-manager }}"
+          test "${{ steps.configure-nodejs.outputs.install-command }}" = "${{ matrix.install-command }}"
+          test "${{ steps.configure-nodejs.outputs.working-directory }}" = "${{ matrix.fixture }}"
+          test -n "${{ steps.configure-nodejs.outputs.lockfile-path }}"
+
+      - name: Validate installed dependency
+        working-directory: ${{ matrix.fixture }}
+        run: node check.mjs
+
+  fixture-cache-lookup:
+    name: Fixture Cache Lookup (${{ matrix.package-manager }})
+    needs: fixture-install
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - package-manager: npm
+            fixture: fixtures/npm-basic
+            install-command: npm ci
+          - package-manager: pnpm
+            fixture: fixtures/pnpm-basic
+            install-command: pnpm install --frozen-lockfile
+          - package-manager: yarn
+            fixture: fixtures/yarn-basic
+            install-command: yarn install --immutable
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Lookup dependency cache
+        id: configure-nodejs
+        uses: ./
+        with:
+          node-version: 22.x
+          working-directory: ${{ matrix.fixture }}
+          lookup-only: "true"
+
+      - name: Assert cache lookup result
+        shell: bash
+        run: |
+          test "${{ steps.configure-nodejs.outputs.package-manager }}" = "${{ matrix.package-manager }}"
+          test "${{ steps.configure-nodejs.outputs.install-command }}" = "${{ matrix.install-command }}"
+          test "${{ steps.configure-nodejs.outputs.working-directory }}" = "${{ matrix.fixture }}"
+          test "${{ steps.configure-nodejs.outputs.cache-hit }}" = "true"
+

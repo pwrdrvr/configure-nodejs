@@ -1,0 +1,9 @@
+{
+  "name": "npm-basic-fixture",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "picocolors": "1.1.1"
+  }
+}
+
