@@ -1,0 +1,94 @@
+name: "Configure Node.js"
+description: "Install Node.js, resolve the package manager, restore dependency cache, and install dependencies on cache miss"
+
+inputs:
+  node-version:
+    description: "Node.js version to install"
+    default: "22.x"
+  package-manager:
+    description: "Explicit package manager override (npm, yarn, pnpm)"
+    default: ""
+  working-directory:
+    description: "Repository-relative directory containing package.json and lockfile"
+    default: "."
+  lookup-only:
+    description: "If true, only checks if the dependency cache exists and skips download. Does not change save cache behavior"
+    default: "false"
+
+outputs:
+  package-manager:
+    description: "Resolved package manager"
+    value: ${{ steps.resolve-package-manager.outputs.packageManager }}
+  package-manager-version:
+    description: "Resolved package manager version from package.json when available"
+    value: ${{ steps.resolve-package-manager.outputs.packageManagerVersion }}
+  manager-cache-key:
+    description: "Package-manager-specific cache key segment"
+    value: ${{ steps.resolve-package-manager.outputs.managerCacheKey }}
+  lockfile-name:
+    description: "Detected lockfile name"
+    value: ${{ steps.resolve-package-manager.outputs.lockfileName }}
+  lockfile-path:
+    description: "Detected lockfile path relative to the working directory"
+    value: ${{ steps.resolve-package-manager.outputs.lockfilePath }}
+  lockfile-sha:
+    description: "SHA256 hash of the detected lockfile"
+    value: ${{ steps.resolve-package-manager.outputs.lockfileSha }}
+  install-command:
+    description: "Install command used on cache miss"
+    value: ${{ steps.resolve-package-manager.outputs.installCommand }}
+  working-directory:
+    description: "Normalized repository-relative working directory"
+    value: ${{ steps.resolve-cache-paths.outputs.workingDirectory }}
+  working-directory-key:
+    description: "Cache-key-safe identifier for the normalized working directory"
+    value: ${{ steps.resolve-cache-paths.outputs.workingDirectoryKey }}
+  cache-hit:
+    description: "Whether actions/cache restored a dependency cache entry"
+    value: ${{ steps.cache-node-modules.outputs.cache-hit }}
+
+runs:
+  using: "composite"
+  steps:
+    - uses: actions/setup-node@v6
+      with:
+        node-version: ${{ inputs.node-version }}
+        package-manager-cache: false
+
+    - name: Resolve working directory and cache paths
+      id: resolve-cache-paths
+      shell: bash
+      run: |
+        node "$GITHUB_ACTION_PATH/scripts/resolve-cache-paths.mjs" \
+          --cwd "$GITHUB_WORKSPACE" \
+          --working-directory "${{ inputs.working-directory }}" \
+          --github-output "$GITHUB_OUTPUT"
+
+    - name: Resolve package manager
+      id: resolve-package-manager
+      shell: bash
+      run: |
+        node "$GITHUB_ACTION_PATH/scripts/resolve-manager.mjs" \
+          --cwd "${{ steps.resolve-cache-paths.outputs.absoluteWorkingDirectory }}" \
+          --package-manager "${{ inputs.package-manager }}" \
+          --github-output "$GITHUB_OUTPUT"
+
+    - name: Enable Corepack
+      if: steps.resolve-package-manager.outputs.needsCorepack == 'true'
+      shell: bash
+      run: corepack enable
+
+    - name: Restore dependencies from cache
+      id: cache-node-modules
+      uses: actions/cache@v5
+      with:
+        path: ${{ steps.resolve-cache-paths.outputs.cachePaths }}
+        key: node-modules-${{ inputs.node-version }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.resolve-cache-paths.outputs.workingDirectoryKey }}-${{ steps.resolve-package-manager.outputs.managerCacheKey }}-${{ steps.resolve-package-manager.outputs.lockfileSha }}
+        lookup-only: ${{ inputs.lookup-only }}
+
+    - name: Install dependencies
+      if: steps.cache-node-modules.outputs.cache-hit != 'true'
+      shell: bash
+      working-directory: ${{ steps.resolve-cache-paths.outputs.workingDirectory }}
+      run: ${{ steps.resolve-package-manager.outputs.installCommand }}
+
