@@ -65,9 +65,16 @@ jobs:
           test "${{ steps.configure-nodejs.outputs.working-directory }}" = "${{ matrix.fixture }}"
           test "${{ steps.configure-nodejs.outputs.lockfile-name }}" = "${{ matrix.lockfile-name }}"
 
-      - name: Validate installed dependency
+      - name: Assert lookup-only behavior
         working-directory: ${{ matrix.fixture }}
-        run: node check.mjs
+        shell: bash
+        run: |
+          if [ "${{ steps.configure-nodejs.outputs.cache-hit }}" = "true" ]; then
+            test ! -d node_modules
+          else
+            test -d node_modules
+            node check.mjs
+          fi
 
   fixture-validate:
     name: Fixture Validate (${{ matrix.package-manager }})
