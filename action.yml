@@ -53,34 +53,69 @@ outputs:
 runs:
   using: "composite"
   steps:
-    - uses: actions/setup-node@v6
-      with:
-        node-version: ${{ inputs.node-version }}
-        package-manager-cache: false
-
     - name: Resolve working directory and cache paths
       id: resolve-cache-paths
-      shell: bash
-      run: |
-        node "$GITHUB_ACTION_PATH/scripts/resolve-cache-paths.mjs" \
-          --cwd "$GITHUB_WORKSPACE" \
-          --working-directory "${{ inputs.working-directory }}" \
-          --cache-key-suffix "${{ inputs.cache-key-suffix }}" \
-          --github-output "$GITHUB_OUTPUT"
+      uses: actions/github-script@v8
+      env:
+        CONFIGURE_NODEJS_WORKING_DIRECTORY: ${{ inputs.working-directory }}
+        CONFIGURE_NODEJS_CACHE_KEY_SUFFIX: ${{ inputs.cache-key-suffix }}
+      with:
+        script: |
+          const path = require('path');
+          const { pathToFileURL } = require('url');
+
+          const moduleUrl = pathToFileURL(
+            path.join(process.env.GITHUB_ACTION_PATH, 'scripts', 'resolve-cache-paths.mjs'),
+          ).href;
+          const {
+            buildResult,
+          } = await import(moduleUrl);
+
+          const result = buildResult({
+            cwd: process.env.GITHUB_WORKSPACE,
+            workingDirectory: process.env.CONFIGURE_NODEJS_WORKING_DIRECTORY,
+            cacheKeySuffix: process.env.CONFIGURE_NODEJS_CACHE_KEY_SUFFIX,
+          });
+
+          core.setOutput('absoluteWorkingDirectory', result.absoluteWorkingDirectory);
+          core.setOutput('workingDirectory', result.workingDirectory);
+          core.setOutput('workingDirectoryKey', result.workingDirectoryKey);
+          core.setOutput('cachePaths', result.cachePaths.join('\n'));
+          core.setOutput('cacheKeySuffix', result.cacheKeySuffix);
+          core.setOutput('cacheKeySuffixSegment', result.cacheKeySuffixSegment);
 
     - name: Resolve package manager
       id: resolve-package-manager
-      shell: bash
-      run: |
-        node "$GITHUB_ACTION_PATH/scripts/resolve-manager.mjs" \
-          --cwd "${{ steps.resolve-cache-paths.outputs.absoluteWorkingDirectory }}" \
-          --package-manager "${{ inputs.package-manager }}" \
-          --github-output "$GITHUB_OUTPUT"
+      uses: actions/github-script@v8
+      env:
+        CONFIGURE_NODEJS_ABSOLUTE_WORKING_DIRECTORY: ${{ steps.resolve-cache-paths.outputs.absoluteWorkingDirectory }}
+        CONFIGURE_NODEJS_PACKAGE_MANAGER: ${{ inputs.package-manager }}
+      with:
+        script: |
+          const path = require('path');
+          const { pathToFileURL } = require('url');
 
-    - name: Enable Corepack
-      if: steps.resolve-package-manager.outputs.needsCorepack == 'true'
-      shell: bash
-      run: corepack enable
+          const moduleUrl = pathToFileURL(
+            path.join(process.env.GITHUB_ACTION_PATH, 'scripts', 'resolve-manager.mjs'),
+          ).href;
+          const {
+            buildResult,
+            normalizeManager,
+          } = await import(moduleUrl);
+
+          const result = buildResult({
+            cwd: process.env.CONFIGURE_NODEJS_ABSOLUTE_WORKING_DIRECTORY,
+            explicitManager: normalizeManager(process.env.CONFIGURE_NODEJS_PACKAGE_MANAGER ?? ''),
+          });
+
+          core.setOutput('packageManager', result.packageManager);
+          core.setOutput('packageManagerVersion', result.packageManagerVersion);
+          core.setOutput('managerCacheKey', result.managerCacheKey);
+          core.setOutput('lockfileName', result.lockfileName);
+          core.setOutput('lockfilePath', result.lockfilePath);
+          core.setOutput('lockfileSha', result.lockfileSha);
+          core.setOutput('installCommand', result.installCommand);
+          core.setOutput('needsCorepack', result.needsCorepack);
 
     - name: Restore dependencies from cache
       id: cache-node-modules
@@ -89,6 +124,17 @@ runs:
         path: ${{ steps.resolve-cache-paths.outputs.cachePaths }}
         key: node-modules-${{ inputs.node-version }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.resolve-cache-paths.outputs.workingDirectoryKey }}-${{ steps.resolve-package-manager.outputs.managerCacheKey }}-${{ steps.resolve-package-manager.outputs.lockfileSha }}${{ steps.resolve-cache-paths.outputs.cacheKeySuffixSegment }}
         lookup-only: ${{ inputs.lookup-only }}
+
+    - uses: actions/setup-node@v6
+      if: inputs.lookup-only != 'true' || steps.cache-node-modules.outputs.cache-hit != 'true'
+      with:
+        node-version: ${{ inputs.node-version }}
+        package-manager-cache: false
+
+    - name: Enable Corepack
+      if: (inputs.lookup-only != 'true' || steps.cache-node-modules.outputs.cache-hit != 'true') && steps.resolve-package-manager.outputs.needsCorepack == 'true'
+      shell: bash
+      run: corepack enable
 
     - name: Install dependencies
       if: steps.cache-node-modules.outputs.cache-hit != 'true'
