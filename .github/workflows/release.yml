@@ -5,6 +5,10 @@ on:
     tags:
       - "v*.*.*"
 
+concurrency:
+  group: release-tags
+  cancel-in-progress: false
+
 jobs:
   release:
     runs-on: ubuntu-latest
@@ -15,24 +19,121 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Update major version tag
+      - name: Determine whether to update major version tag
+        id: determine-major-tag
         uses: actions/github-script@v8
         env:
           VERSION_TAG: ${{ github.ref_name }}
         with:
           script: |
             const versionTag = process.env.VERSION_TAG;
-            const match = versionTag.match(/^v(\d+)\.\d+\.\d+(?:[-+].+)?$/);
 
-            if (!match) {
+            function parseVersion(tag) {
+              const match = tag.match(/^v(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+.*)?$/);
+
+              if (!match) {
+                return null;
+              }
+
+              return {
+                major: Number.parseInt(match[1], 10),
+                minor: Number.parseInt(match[2], 10),
+                patch: Number.parseInt(match[3], 10),
+                prerelease: match[4] ?? '',
+              };
+            }
+
+            function compareVersions(left, right) {
+              if (left.major !== right.major) {
+                return left.major - right.major;
+              }
+
+              if (left.minor !== right.minor) {
+                return left.minor - right.minor;
+              }
+
+              if (left.patch !== right.patch) {
+                return left.patch - right.patch;
+              }
+
+              if (left.prerelease === right.prerelease) {
+                return 0;
+              }
+
+              if (left.prerelease === '') {
+                return 1;
+              }
+
+              if (right.prerelease === '') {
+                return -1;
+              }
+
+              return left.prerelease.localeCompare(right.prerelease);
+            }
+
+            const parsedVersion = parseVersion(versionTag);
+
+            if (!parsedVersion) {
               core.setFailed(`Expected a semantic version tag like v1.2.3, got ${versionTag}`);
               return;
             }
 
-            const majorTag = `v${match[1]}`;
+            const majorTag = `v${parsedVersion.major}`;
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            core.setOutput('majorTag', majorTag);
+
+            if (parsedVersion.prerelease !== '') {
+              core.notice(`Skipping ${majorTag} update for prerelease tag ${versionTag}.`);
+              core.setOutput('shouldUpdate', 'false');
+              return;
+            }
+
+            const refs = await github.paginate(github.rest.git.listMatchingRefs, {
+              owner,
+              repo,
+              ref: `tags/${majorTag}.`,
+            });
+
+            const stableVersions = refs
+              .map((ref) => ref.ref.replace('refs/tags/', ''))
+              .map((tag) => ({
+                tag,
+                version: parseVersion(tag),
+              }))
+              .filter((entry) => entry.version && entry.version.prerelease === '')
+              .filter((entry) => entry.version.major === parsedVersion.major);
+
+            const latestStable = stableVersions.reduce((latest, entry) => {
+              if (!latest) {
+                return entry;
+              }
+
+              return compareVersions(entry.version, latest.version) > 0 ? entry : latest;
+            }, null);
+
+            if (!latestStable || latestStable.tag === versionTag) {
+              core.notice(`Updating ${majorTag} to ${versionTag}.`);
+              core.setOutput('shouldUpdate', 'true');
+              return;
+            }
+
+            core.notice(
+              `Skipping ${majorTag} update for ${versionTag} because ${latestStable.tag} is newer.`,
+            );
+            core.setOutput('shouldUpdate', 'false');
+
+      - name: Update major version tag
+        if: steps.determine-major-tag.outputs.shouldUpdate == 'true'
+        uses: actions/github-script@v8
+        env:
+          MAJOR_TAG: ${{ steps.determine-major-tag.outputs.majorTag }}
+        with:
+          script: |
             const owner = context.repo.owner;
             const repo = context.repo.repo;
             const sha = context.sha;
+            const majorTag = process.env.MAJOR_TAG;
 
             try {
               await github.rest.git.getRef({
