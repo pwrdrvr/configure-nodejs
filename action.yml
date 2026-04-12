@@ -117,17 +117,6 @@ runs:
           core.setOutput('installCommand', result.installCommand);
           core.setOutput('needsCorepack', result.needsCorepack);
 
-    - uses: actions/setup-node@v6
-      if: inputs.lookup-only != 'true'
-      with:
-        node-version: ${{ inputs.node-version }}
-        package-manager-cache: false
-
-    - name: Enable Corepack
-      if: inputs.lookup-only != 'true' && steps.resolve-package-manager.outputs.needsCorepack == 'true'
-      shell: bash
-      run: corepack enable
-
     - name: Restore dependencies from cache
       id: cache-node-modules
       uses: actions/cache/restore@v5
@@ -135,6 +124,17 @@ runs:
         path: ${{ steps.resolve-cache-paths.outputs.cachePaths }}
         key: node-modules-${{ inputs.node-version }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.resolve-cache-paths.outputs.workingDirectoryKey }}-${{ steps.resolve-package-manager.outputs.managerCacheKey }}-${{ steps.resolve-package-manager.outputs.lockfileSha }}${{ steps.resolve-cache-paths.outputs.cacheKeySuffixSegment }}
         lookup-only: ${{ inputs.lookup-only }}
+
+    - uses: actions/setup-node@v6
+      if: inputs.lookup-only != 'true' || steps.cache-node-modules.outputs.cache-hit != 'true'
+      with:
+        node-version: ${{ inputs.node-version }}
+        package-manager-cache: false
+
+    - name: Enable Corepack
+      if: (inputs.lookup-only != 'true' || steps.cache-node-modules.outputs.cache-hit != 'true') && steps.resolve-package-manager.outputs.needsCorepack == 'true'
+      shell: bash
+      run: corepack enable
 
     - name: Install dependencies
       if: steps.cache-node-modules.outputs.cache-hit != 'true'

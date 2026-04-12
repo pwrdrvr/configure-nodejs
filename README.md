@@ -55,7 +55,7 @@ steps:
 | `package-manager` | `""` | Optional override for `npm`, `pnpm`, or `yarn`; by default the action follows the package manager inferred from `package.json` and the lockfile present |
 | `working-directory` | `"."` | Repository-relative directory containing `package.json` and the lockfile |
 | `cache-key-suffix` | `""` | Optional suffix appended to the dependency cache key when you want to namespace cache entries |
-| `lookup-only` | `"false"` | When `true`, only checks whether the cache exists and skips downloading it; the action also skips `setup-node` and install-time package-manager setup |
+| `lookup-only` | `"false"` | When `true`, only checks whether the cache exists and skips downloading it; on a cache hit the action also skips `setup-node` and install-time package-manager setup |
 
 ## Outputs
 
@@ -94,7 +94,7 @@ The cache key includes:
 
 The cache paths are scoped to the configured `working-directory`, which keeps fixture directories and subdirectory apps isolated from each other.
 
-When `lookup-only` is `true`, the action resolves the cache key without calling `actions/setup-node`, which keeps cache-primer jobs lighter on self-hosted runners.
+When `lookup-only` is `true`, the action resolves the cache key before installing Node. On a cache hit it stops there; on a cache miss it still installs Node, enables Corepack when needed, and primes the cache.
 
 ## Yarn support boundary
 
