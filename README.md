@@ -5,8 +5,8 @@
 - install Node.js
 - detect npm, pnpm, or Yarn from `package.json` and lockfiles
 - enable Corepack when the package manager needs it
-- restore a `node_modules`-oriented dependency cache
-- install dependencies on cache miss
+- restore a dependency cache
+- install dependencies when the selected package manager needs a materialized install
 
 The action is designed to be shared as `pwrdrvr/configure-nodejs@v1` and to work for both repository-root projects and subdirectory projects in monorepos.
 
@@ -67,7 +67,7 @@ steps:
 | `lockfile-name` | Detected lockfile name |
 | `lockfile-path` | Lockfile path relative to the working directory |
 | `lockfile-sha` | SHA256 hash of the lockfile |
-| `install-command` | Install command used on cache miss |
+| `install-command` | Install command used when dependency installation runs |
 | `working-directory` | Normalized working directory |
 | `working-directory-key` | Cache-key-safe working-directory identifier |
 | `cache-hit` | `true` when the dependency cache entry exists for the computed key |
@@ -93,6 +93,12 @@ The cache key includes:
 - lockfile SHA
 
 The cache paths are scoped to the configured `working-directory`, which keeps fixture directories and subdirectory apps isolated from each other.
+
+For npm and Yarn, the action caches `node_modules` paths and skips installation on a cache hit.
+
+For pnpm, the action caches a workspace-local `.pnpm-store` path and runs `pnpm install --frozen-lockfile --store-dir .pnpm-store` in normal restore mode, even on a cache hit. pnpm's `node_modules` layout is symlink-heavy and can fail when restored from a recursive `node_modules` archive; caching the store avoids that extraction problem while keeping installs fast.
+
+For pnpm, `cache-hit` means the store cache was found. It does not mean `node_modules` was restored. In `lookup-only` mode, a pnpm cache hit still skips Node.js setup and dependency installation.
 
 When `lookup-only` is `true`, the action resolves the cache key before installing Node. On a cache hit it stops there; on a cache miss it still installs Node, enables Corepack when needed, and primes the cache.
 

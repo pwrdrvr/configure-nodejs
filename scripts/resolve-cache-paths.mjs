@@ -8,6 +8,7 @@ export function parseArgs(argv) {
     cwd: process.cwd(),
     workingDirectory: '.',
     cacheKeySuffix: '',
+    packageManager: '',
     githubOutput: process.env.GITHUB_OUTPUT ?? '',
   };
 
@@ -22,6 +23,9 @@ export function parseArgs(argv) {
       index += 1;
     } else if (arg === '--cache-key-suffix') {
       args.cacheKeySuffix = argv[index + 1] ?? '';
+      index += 1;
+    } else if (arg === '--package-manager') {
+      args.packageManager = argv[index + 1] ?? '';
       index += 1;
     } else if (arg === '--github-output') {
       args.githubOutput = argv[index + 1] ?? '';
@@ -89,8 +93,28 @@ export function normalizeCacheKeySuffix(cacheKeySuffix) {
   return normalized.replace(/[^A-Za-z0-9_.-]+/g, '-');
 }
 
-export function buildCachePaths(workingDirectory) {
+export function normalizePackageManager(packageManager) {
+  const normalized = packageManager.trim().toLowerCase();
+  if (normalized === '') {
+    return '';
+  }
+
+  if (!['npm', 'pnpm', 'yarn'].includes(normalized)) {
+    throw new Error(
+      `Unsupported package manager "${packageManager}". Expected one of npm, yarn, pnpm.`,
+    );
+  }
+
+  return normalized;
+}
+
+export function buildCachePaths(workingDirectory, packageManager = '') {
   const base = workingDirectory === '.' ? '' : `${workingDirectory}/`;
+
+  if (packageManager === 'pnpm') {
+    return [`${base}.pnpm-store`];
+  }
+
   return [
     `${base}node_modules`,
     `${base}**/node_modules`,
@@ -99,9 +123,24 @@ export function buildCachePaths(workingDirectory) {
   ];
 }
 
-export function buildResult({ cwd, workingDirectory, cacheKeySuffix = '' }) {
+export function buildPrimaryCachePath(workingDirectory, packageManager = '') {
+  const base = workingDirectory === '.' ? '' : `${workingDirectory}/`;
+  return packageManager === 'pnpm' ? `${base}.pnpm-store` : `${base}node_modules`;
+}
+
+export function buildCacheKeyPrefix(packageManager = '') {
+  return packageManager === 'pnpm' ? 'pnpm-store' : 'node-modules';
+}
+
+export function buildResult({
+  cwd,
+  workingDirectory,
+  cacheKeySuffix = '',
+  packageManager = '',
+}) {
   const resolvedWorkingDirectory = resolveWorkingDirectory(cwd, workingDirectory);
   const normalizedCacheKeySuffix = normalizeCacheKeySuffix(cacheKeySuffix);
+  const normalizedPackageManager = normalizePackageManager(packageManager);
 
   return {
     absoluteWorkingDirectory: resolvedWorkingDirectory.absoluteWorkingDirectory,
@@ -109,7 +148,15 @@ export function buildResult({ cwd, workingDirectory, cacheKeySuffix = '' }) {
     workingDirectoryKey: buildWorkingDirectoryKey(
       resolvedWorkingDirectory.workingDirectory,
     ),
-    cachePaths: buildCachePaths(resolvedWorkingDirectory.workingDirectory),
+    cachePaths: buildCachePaths(
+      resolvedWorkingDirectory.workingDirectory,
+      normalizedPackageManager,
+    ),
+    primaryCachePath: buildPrimaryCachePath(
+      resolvedWorkingDirectory.workingDirectory,
+      normalizedPackageManager,
+    ),
+    cacheKeyPrefix: buildCacheKeyPrefix(normalizedPackageManager),
     cacheKeySuffix: normalizedCacheKeySuffix,
     cacheKeySuffixSegment:
       normalizedCacheKeySuffix === '' ? '' : `-${normalizedCacheKeySuffix}`,
@@ -140,6 +187,7 @@ export function main(argv = process.argv.slice(2)) {
     cwd: args.cwd,
     workingDirectory: args.workingDirectory,
     cacheKeySuffix: args.cacheKeySuffix,
+    packageManager: args.packageManager,
   });
 
   writeGithubOutput(args.githubOutput, result);
