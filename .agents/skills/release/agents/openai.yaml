@@ -1,0 +1,4 @@
+interface:
+  display_name: "Release"
+  short_description: "Plan, write notes, and publish releases"
+  default_prompt: "Use $release to plan the next release, draft release notes, and publish it safely."
