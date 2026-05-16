@@ -165,6 +165,13 @@ runs:
       shell: bash
       run: corepack enable
 
+    - name: Configure pnpm store
+      if: steps.resolve-package-manager.outputs.packageManager == 'pnpm' && inputs.lookup-only != 'true'
+      shell: bash
+      env:
+        CONFIGURE_NODEJS_ABSOLUTE_WORKING_DIRECTORY: ${{ steps.resolve-cache-paths.outputs.absoluteWorkingDirectory }}
+      run: echo "npm_config_store_dir=$CONFIGURE_NODEJS_ABSOLUTE_WORKING_DIRECTORY/.pnpm-store" >> "$GITHUB_ENV"
+
     - name: Install dependencies
       if: steps.cache-dependencies.outputs.cache-hit != 'true' || (steps.resolve-package-manager.outputs.packageManager == 'pnpm' && inputs.lookup-only != 'true')
       shell: bash

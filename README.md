@@ -96,7 +96,7 @@ The cache paths are scoped to the configured `working-directory`, which keeps fi
 
 For npm and Yarn, the action caches `node_modules` paths and skips installation on a cache hit.
 
-For pnpm, the action caches a workspace-local `.pnpm-store` path and runs `pnpm install --frozen-lockfile --store-dir .pnpm-store` in normal restore mode, even on a cache hit. pnpm's `node_modules` layout is symlink-heavy and can fail when restored from a recursive `node_modules` archive; caching the store avoids that extraction problem while keeping installs fast.
+For pnpm, the action caches a workspace-local `.pnpm-store` path and runs `pnpm install --frozen-lockfile --store-dir .pnpm-store` in normal restore mode, even on a cache hit. The action also exports `npm_config_store_dir` for later workflow steps so follow-up pnpm commands use the same store. pnpm's `node_modules` layout is symlink-heavy and can fail when restored from a recursive `node_modules` archive; caching the store avoids that extraction problem while keeping installs fast.
 
 For pnpm, `cache-hit` means the store cache was found. It does not mean `node_modules` was restored. In `lookup-only` mode, a pnpm cache hit still skips Node.js setup and dependency installation.
 
