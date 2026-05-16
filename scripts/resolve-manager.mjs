@@ -178,7 +178,7 @@ export function buildResult({ cwd, explicitManager }) {
   if (resolvedManager === 'npm') {
     installCommand = 'npm ci';
   } else if (resolvedManager === 'pnpm') {
-    installCommand = 'pnpm install --frozen-lockfile';
+    installCommand = 'pnpm install --frozen-lockfile --store-dir .pnpm-store';
   } else {
     installCommand = getYarnInstallCommand(packageManagerVersion, cwd);
   }

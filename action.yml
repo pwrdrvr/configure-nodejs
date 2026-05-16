@@ -1,5 +1,5 @@
 name: "Configure Node.js"
-description: "Install Node.js, resolve the package manager, restore dependency cache, and install dependencies on cache miss"
+description: "Install Node.js, resolve the package manager, restore dependency cache, and install dependencies when needed"
 
 inputs:
   node-version:
@@ -38,7 +38,7 @@ outputs:
     description: "SHA256 hash of the detected lockfile"
     value: ${{ steps.resolve-package-manager.outputs.lockfileSha }}
   install-command:
-    description: "Install command used on cache miss"
+    description: "Install command used when dependency installation runs"
     value: ${{ steps.resolve-package-manager.outputs.installCommand }}
   working-directory:
     description: "Normalized repository-relative working directory"
@@ -48,12 +48,12 @@ outputs:
     value: ${{ steps.resolve-cache-paths.outputs.workingDirectoryKey }}
   cache-hit:
     description: "Whether actions/cache restored a dependency cache entry"
-    value: ${{ steps.cache-node-modules.outputs.cache-hit }}
+    value: ${{ steps.cache-dependencies.outputs.cache-hit }}
 
 runs:
   using: "composite"
   steps:
-    - name: Resolve working directory and cache paths
+    - name: Resolve working directory
       id: resolve-cache-paths
       uses: actions/github-script@v8
       env:
@@ -80,7 +80,6 @@ runs:
           core.setOutput('absoluteWorkingDirectory', result.absoluteWorkingDirectory);
           core.setOutput('workingDirectory', result.workingDirectory);
           core.setOutput('workingDirectoryKey', result.workingDirectoryKey);
-          core.setOutput('cachePaths', result.cachePaths.join('\n'));
           core.setOutput('cacheKeySuffix', result.cacheKeySuffix);
           core.setOutput('cacheKeySuffixSegment', result.cacheKeySuffixSegment);
 
@@ -117,46 +116,88 @@ runs:
           core.setOutput('installCommand', result.installCommand);
           core.setOutput('needsCorepack', result.needsCorepack);
 
+    - name: Resolve dependency cache paths
+      id: resolve-dependency-cache-paths
+      uses: actions/github-script@v8
+      env:
+        CONFIGURE_NODEJS_WORKING_DIRECTORY: ${{ inputs.working-directory }}
+        CONFIGURE_NODEJS_CACHE_KEY_SUFFIX: ${{ inputs.cache-key-suffix }}
+        CONFIGURE_NODEJS_PACKAGE_MANAGER: ${{ steps.resolve-package-manager.outputs.packageManager }}
+      with:
+        script: |
+          const path = require('path');
+          const { pathToFileURL } = require('url');
+
+          const moduleUrl = pathToFileURL(
+            path.join(process.env.GITHUB_ACTION_PATH, 'scripts', 'resolve-cache-paths.mjs'),
+          ).href;
+          const {
+            buildResult,
+          } = await import(moduleUrl);
+
+          const result = buildResult({
+            cwd: process.env.GITHUB_WORKSPACE,
+            workingDirectory: process.env.CONFIGURE_NODEJS_WORKING_DIRECTORY,
+            cacheKeySuffix: process.env.CONFIGURE_NODEJS_CACHE_KEY_SUFFIX,
+            packageManager: process.env.CONFIGURE_NODEJS_PACKAGE_MANAGER,
+          });
+
+          core.setOutput('cachePaths', result.cachePaths.join('\n'));
+          core.setOutput('primaryCachePath', result.primaryCachePath);
+          core.setOutput('cacheKeyPrefix', result.cacheKeyPrefix);
+
     - name: Restore dependencies from cache
-      id: cache-node-modules
+      id: cache-dependencies
       uses: actions/cache/restore@v5
       with:
-        path: ${{ steps.resolve-cache-paths.outputs.cachePaths }}
-        key: node-modules-${{ inputs.node-version }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.resolve-cache-paths.outputs.workingDirectoryKey }}-${{ steps.resolve-package-manager.outputs.managerCacheKey }}-${{ steps.resolve-package-manager.outputs.lockfileSha }}${{ steps.resolve-cache-paths.outputs.cacheKeySuffixSegment }}
+        path: ${{ steps.resolve-dependency-cache-paths.outputs.cachePaths }}
+        key: ${{ steps.resolve-dependency-cache-paths.outputs.cacheKeyPrefix }}-${{ inputs.node-version }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.resolve-cache-paths.outputs.workingDirectoryKey }}-${{ steps.resolve-package-manager.outputs.managerCacheKey }}-${{ steps.resolve-package-manager.outputs.lockfileSha }}${{ steps.resolve-cache-paths.outputs.cacheKeySuffixSegment }}
         lookup-only: ${{ inputs.lookup-only }}
 
     - uses: actions/setup-node@v6
-      if: inputs.lookup-only != 'true' || steps.cache-node-modules.outputs.cache-hit != 'true'
+      if: inputs.lookup-only != 'true' || steps.cache-dependencies.outputs.cache-hit != 'true'
       with:
         node-version: ${{ inputs.node-version }}
         package-manager-cache: false
 
     - name: Enable Corepack
-      if: (inputs.lookup-only != 'true' || steps.cache-node-modules.outputs.cache-hit != 'true') && steps.resolve-package-manager.outputs.needsCorepack == 'true'
+      if: (inputs.lookup-only != 'true' || steps.cache-dependencies.outputs.cache-hit != 'true') && steps.resolve-package-manager.outputs.needsCorepack == 'true'
       shell: bash
       run: corepack enable
 
     - name: Install dependencies
-      if: steps.cache-node-modules.outputs.cache-hit != 'true'
+      if: steps.cache-dependencies.outputs.cache-hit != 'true' || (steps.resolve-package-manager.outputs.packageManager == 'pnpm' && inputs.lookup-only != 'true')
       shell: bash
       working-directory: ${{ steps.resolve-cache-paths.outputs.workingDirectory }}
       run: ${{ steps.resolve-package-manager.outputs.installCommand }}
 
     - name: Detect cacheable dependency paths
       id: detect-cache-paths
-      if: steps.cache-node-modules.outputs.cache-hit != 'true'
+      if: steps.cache-dependencies.outputs.cache-hit != 'true'
       shell: bash
-      working-directory: ${{ steps.resolve-cache-paths.outputs.workingDirectory }}
+      env:
+        CONFIGURE_NODEJS_PACKAGE_MANAGER: ${{ steps.resolve-package-manager.outputs.packageManager }}
+        CONFIGURE_NODEJS_PRIMARY_CACHE_PATH: ${{ steps.resolve-dependency-cache-paths.outputs.primaryCachePath }}
+        CONFIGURE_NODEJS_WORKING_DIRECTORY: ${{ steps.resolve-cache-paths.outputs.workingDirectory }}
       run: |
-        if find . -type d -name node_modules -print -quit | grep -q .; then
+        if [ "$CONFIGURE_NODEJS_PACKAGE_MANAGER" = "pnpm" ]; then
+          if [ -e "$CONFIGURE_NODEJS_PRIMARY_CACHE_PATH" ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+          exit 0
+        fi
+
+        if find "$CONFIGURE_NODEJS_WORKING_DIRECTORY" -type d -name node_modules -print -quit | grep -q .; then
           echo "exists=true" >> "$GITHUB_OUTPUT"
         else
           echo "exists=false" >> "$GITHUB_OUTPUT"
         fi
 
     - name: Save dependencies to cache
-      if: steps.cache-node-modules.outputs.cache-hit != 'true' && steps.detect-cache-paths.outputs.exists == 'true'
+      if: steps.cache-dependencies.outputs.cache-hit != 'true' && steps.detect-cache-paths.outputs.exists == 'true'
       uses: actions/cache/save@v5
       with:
-        path: ${{ steps.resolve-cache-paths.outputs.cachePaths }}
-        key: node-modules-${{ inputs.node-version }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.resolve-cache-paths.outputs.workingDirectoryKey }}-${{ steps.resolve-package-manager.outputs.managerCacheKey }}-${{ steps.resolve-package-manager.outputs.lockfileSha }}${{ steps.resolve-cache-paths.outputs.cacheKeySuffixSegment }}
+        path: ${{ steps.resolve-dependency-cache-paths.outputs.cachePaths }}
+        key: ${{ steps.resolve-dependency-cache-paths.outputs.cacheKeyPrefix }}-${{ inputs.node-version }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.resolve-cache-paths.outputs.workingDirectoryKey }}-${{ steps.resolve-package-manager.outputs.managerCacheKey }}-${{ steps.resolve-package-manager.outputs.lockfileSha }}${{ steps.resolve-cache-paths.outputs.cacheKeySuffixSegment }}
