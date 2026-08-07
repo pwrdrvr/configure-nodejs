@@ -92,17 +92,29 @@ jobs:
             );
             assert.notEqual(process.env.ACTUAL_CACHE_HIT, 'true');
             if (process.env.EXPECTED_PACKAGE_MANAGER === 'pnpm') {
-              assert.equal(
-                path.resolve(process.env.ACTUAL_PNPM_STORE_PATH),
-                path.join(
-                  process.env.GITHUB_WORKSPACE,
-                  process.env.EXPECTED_WORKING_DIRECTORY,
-                  '.pnpm-store',
-                ),
+              const expectedStoreRoot = path.join(
+                process.env.GITHUB_WORKSPACE,
+                process.env.EXPECTED_WORKING_DIRECTORY,
+                '.pnpm-store',
+              );
+              const normalizeForComparison = (value) => {
+                const normalized = path.resolve(value);
+                return process.platform === 'win32'
+                  ? normalized.toLowerCase()
+                  : normalized;
+              };
+              const relativeStorePath = path.relative(
+                normalizeForComparison(expectedStoreRoot),
+                normalizeForComparison(process.env.ACTUAL_PNPM_STORE_PATH),
+              );
+              assert.ok(
+                relativeStorePath !== '..' &&
+                  !relativeStorePath.startsWith(`..${path.sep}`) &&
+                  !path.isAbsolute(relativeStorePath),
               );
               assert.equal(
-                path.resolve(process.env.npm_config_store_dir),
-                path.resolve(process.env.ACTUAL_PNPM_STORE_PATH),
+                normalizeForComparison(process.env.npm_config_store_dir),
+                normalizeForComparison(expectedStoreRoot),
               );
             }
             core.notice(

@@ -284,12 +284,17 @@ runs:
                 : normalized;
             };
 
+            const relativeStorePath = path.relative(
+              normalizeForComparison(expectedStorePath),
+              normalizeForComparison(discoveredStorePath),
+            );
             if (
-              normalizeForComparison(discoveredStorePath) !==
-              normalizeForComparison(expectedStorePath)
+              relativeStorePath === '..' ||
+              relativeStorePath.startsWith(`..${path.sep}`) ||
+              path.isAbsolute(relativeStorePath)
             ) {
               throw new Error(
-                `Expected pnpm store ${expectedStorePath}, got ${discoveredStorePath}.`,
+                `Expected pnpm store within ${expectedStorePath}, got ${discoveredStorePath}.`,
               );
             }
 
