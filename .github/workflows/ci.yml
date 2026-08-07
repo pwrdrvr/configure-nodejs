@@ -1,0 +1,174 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    name: Unit Tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24.14.1
+          package-manager-cache: false
+
+      - name: Run unit tests
+        run: npm test
+
+  fixture:
+    name: Fixture (${{ matrix.os }}, ${{ matrix.package-manager }})
+    needs: unit
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+        package-manager:
+          - npm
+          - pnpm
+          - yarn
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Prime dependency cache
+        id: prime
+        uses: ./
+        with:
+          node-version: 24.14.1
+          working-directory: fixtures/${{ matrix.package-manager }}-basic
+          cache-key-suffix: ci-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.os }}
+
+      - name: Validate primed install and outputs
+        uses: actions/github-script@v8
+        env:
+          EXPECTED_PACKAGE_MANAGER: ${{ matrix.package-manager }}
+          EXPECTED_WORKING_DIRECTORY: fixtures/${{ matrix.package-manager }}-basic
+          ACTUAL_PACKAGE_MANAGER: ${{ steps.prime.outputs.package-manager }}
+          ACTUAL_WORKING_DIRECTORY: ${{ steps.prime.outputs.working-directory }}
+          ACTUAL_CACHE_HIT: ${{ steps.prime.outputs.cache-hit }}
+          ACTUAL_PNPM_STORE_PATH: ${{ steps.prime.outputs.pnpm-store-path }}
+          CACHE_RESTORE_DURATION_MS: ${{ steps.prime.outputs.cache-restore-duration-ms }}
+          SETUP_NODE_DURATION_MS: ${{ steps.prime.outputs.setup-node-duration-ms }}
+          ACTIVATION_DURATION_MS: ${{ steps.prime.outputs.package-manager-activation-duration-ms }}
+          STORE_DISCOVERY_DURATION_MS: ${{ steps.prime.outputs.store-discovery-duration-ms }}
+          INSTALL_DURATION_MS: ${{ steps.prime.outputs.install-duration-ms }}
+          CACHE_SAVE_DURATION_MS: ${{ steps.prime.outputs.cache-save-duration-ms }}
+          TOTAL_DURATION_MS: ${{ steps.prime.outputs.total-duration-ms }}
+        with:
+          script: |
+            const assert = require('assert/strict');
+            const path = require('path');
+            assert.equal(
+              process.env.ACTUAL_PACKAGE_MANAGER,
+              process.env.EXPECTED_PACKAGE_MANAGER,
+            );
+            assert.equal(
+              process.env.ACTUAL_WORKING_DIRECTORY,
+              process.env.EXPECTED_WORKING_DIRECTORY,
+            );
+            assert.notEqual(process.env.ACTUAL_CACHE_HIT, 'true');
+            if (process.env.EXPECTED_PACKAGE_MANAGER === 'pnpm') {
+              assert.equal(
+                path.resolve(process.env.ACTUAL_PNPM_STORE_PATH),
+                path.join(
+                  process.env.GITHUB_WORKSPACE,
+                  process.env.EXPECTED_WORKING_DIRECTORY,
+                  '.pnpm-store',
+                ),
+              );
+              assert.equal(
+                path.resolve(process.env.npm_config_store_dir),
+                path.resolve(process.env.ACTUAL_PNPM_STORE_PATH),
+              );
+            }
+            core.notice(
+              `prime timings (ms): ${JSON.stringify({
+                cacheRestore: process.env.CACHE_RESTORE_DURATION_MS,
+                setupNode: process.env.SETUP_NODE_DURATION_MS,
+                activation: process.env.ACTIVATION_DURATION_MS,
+                storeDiscovery: process.env.STORE_DISCOVERY_DURATION_MS,
+                install: process.env.INSTALL_DURATION_MS,
+                cacheSave: process.env.CACHE_SAVE_DURATION_MS,
+                total: process.env.TOTAL_DURATION_MS,
+              })}`,
+            );
+
+      - name: Validate installed dependency
+        working-directory: fixtures/${{ matrix.package-manager }}-basic
+        run: node check.mjs
+
+      - name: Remove materialized dependencies before restore
+        uses: actions/github-script@v8
+        env:
+          FIXTURE: fixtures/${{ matrix.package-manager }}-basic
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            fs.rmSync(
+              path.join(process.env.GITHUB_WORKSPACE, process.env.FIXTURE, 'node_modules'),
+              { recursive: true, force: true },
+            );
+
+      - name: Restore dependency cache
+        id: restore
+        uses: ./
+        with:
+          node-version: 24.14.1
+          working-directory: fixtures/${{ matrix.package-manager }}-basic
+          cache-key-suffix: ci-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.os }}
+
+      - name: Validate restored install and timings
+        uses: actions/github-script@v8
+        env:
+          ACTUAL_CACHE_HIT: ${{ steps.restore.outputs.cache-hit }}
+          CACHE_RESTORE_DURATION_MS: ${{ steps.restore.outputs.cache-restore-duration-ms }}
+          SETUP_NODE_DURATION_MS: ${{ steps.restore.outputs.setup-node-duration-ms }}
+          ACTIVATION_DURATION_MS: ${{ steps.restore.outputs.package-manager-activation-duration-ms }}
+          STORE_DISCOVERY_DURATION_MS: ${{ steps.restore.outputs.store-discovery-duration-ms }}
+          INSTALL_DURATION_MS: ${{ steps.restore.outputs.install-duration-ms }}
+          CACHE_SAVE_DURATION_MS: ${{ steps.restore.outputs.cache-save-duration-ms }}
+          TOTAL_DURATION_MS: ${{ steps.restore.outputs.total-duration-ms }}
+        with:
+          script: |
+            const assert = require('assert/strict');
+            assert.equal(process.env.ACTUAL_CACHE_HIT, 'true');
+            core.notice(
+              `restore timings (ms): ${JSON.stringify({
+                cacheRestore: process.env.CACHE_RESTORE_DURATION_MS,
+                setupNode: process.env.SETUP_NODE_DURATION_MS,
+                activation: process.env.ACTIVATION_DURATION_MS,
+                storeDiscovery: process.env.STORE_DISCOVERY_DURATION_MS,
+                install: process.env.INSTALL_DURATION_MS,
+                cacheSave: process.env.CACHE_SAVE_DURATION_MS,
+                total: process.env.TOTAL_DURATION_MS,
+              })}`,
+            );
+
+      - name: Validate restored dependency
+        working-directory: fixtures/${{ matrix.package-manager }}-basic
+        run: node check.mjs

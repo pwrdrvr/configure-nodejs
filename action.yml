@@ -49,6 +49,30 @@ outputs:
   cache-hit:
     description: "Whether actions/cache restored a dependency cache entry"
     value: ${{ steps.cache-dependencies.outputs.cache-hit }}
+  pnpm-store-path:
+    description: "Absolute pnpm store path when pnpm setup runs"
+    value: ${{ steps.prepare-package-manager.outputs.pnpmStorePath }}
+  cache-restore-duration-ms:
+    description: "Measured cache restore phase duration in milliseconds"
+    value: ${{ steps.finalize-timings.outputs.cacheRestoreDurationMs }}
+  setup-node-duration-ms:
+    description: "Measured setup-node phase duration in milliseconds"
+    value: ${{ steps.finalize-timings.outputs.setupNodeDurationMs }}
+  package-manager-activation-duration-ms:
+    description: "Measured Corepack/package-manager activation duration in milliseconds"
+    value: ${{ steps.finalize-timings.outputs.activationDurationMs }}
+  store-discovery-duration-ms:
+    description: "Measured pnpm store discovery duration in milliseconds"
+    value: ${{ steps.finalize-timings.outputs.storeDiscoveryDurationMs }}
+  install-duration-ms:
+    description: "Measured dependency installation duration in milliseconds"
+    value: ${{ steps.finalize-timings.outputs.installDurationMs }}
+  cache-save-duration-ms:
+    description: "Measured cache save phase duration in milliseconds"
+    value: ${{ steps.finalize-timings.outputs.cacheSaveDurationMs }}
+  total-duration-ms:
+    description: "Measured total action duration in milliseconds"
+    value: ${{ steps.finalize-timings.outputs.totalDurationMs }}
 
 runs:
   using: "composite"
@@ -61,6 +85,7 @@ runs:
         CONFIGURE_NODEJS_CACHE_KEY_SUFFIX: ${{ inputs.cache-key-suffix }}
       with:
         script: |
+          const actionStartedAt = Date.now();
           const path = require('path');
           const { pathToFileURL } = require('url');
 
@@ -82,6 +107,7 @@ runs:
           core.setOutput('workingDirectoryKey', result.workingDirectoryKey);
           core.setOutput('cacheKeySuffix', result.cacheKeySuffix);
           core.setOutput('cacheKeySuffixSegment', result.cacheKeySuffixSegment);
+          core.setOutput('actionStartedAt', actionStartedAt);
 
     - name: Resolve package manager
       id: resolve-package-manager
@@ -114,6 +140,8 @@ runs:
           core.setOutput('lockfilePath', result.lockfilePath);
           core.setOutput('lockfileSha', result.lockfileSha);
           core.setOutput('installCommand', result.installCommand);
+          core.setOutput('installExecutable', result.installExecutable);
+          core.setOutput('installArguments', JSON.stringify(result.installArguments));
           core.setOutput('needsCorepack', result.needsCorepack);
 
     - name: Resolve dependency cache paths
@@ -144,7 +172,9 @@ runs:
 
           core.setOutput('cachePaths', result.cachePaths.join('\n'));
           core.setOutput('primaryCachePath', result.primaryCachePath);
+          core.setOutput('absolutePrimaryCachePath', result.absolutePrimaryCachePath);
           core.setOutput('cacheKeyPrefix', result.cacheKeyPrefix);
+          core.setOutput('cacheRestoreStartedAt', Date.now());
 
     - name: Restore dependencies from cache
       id: cache-dependencies
@@ -154,53 +184,167 @@ runs:
         key: ${{ steps.resolve-dependency-cache-paths.outputs.cacheKeyPrefix }}-${{ inputs.node-version }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.resolve-cache-paths.outputs.workingDirectoryKey }}-${{ steps.resolve-package-manager.outputs.managerCacheKey }}-${{ steps.resolve-package-manager.outputs.lockfileSha }}${{ steps.resolve-cache-paths.outputs.cacheKeySuffixSegment }}
         lookup-only: ${{ inputs.lookup-only }}
 
-    - uses: actions/setup-node@v6
+    - name: Record cache restore timing
+      id: cache-restore-timing
+      uses: actions/github-script@v8
+      env:
+        CONFIGURE_NODEJS_CACHE_RESTORE_STARTED_AT: ${{ steps.resolve-dependency-cache-paths.outputs.cacheRestoreStartedAt }}
+      with:
+        script: |
+          const now = Date.now();
+          const startedAt = Number.parseInt(
+            process.env.CONFIGURE_NODEJS_CACHE_RESTORE_STARTED_AT,
+            10,
+          );
+          core.setOutput('cacheRestoreDurationMs', now - startedAt);
+          core.setOutput('setupNodeStartedAt', now);
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v6
       if: inputs.lookup-only != 'true' || steps.cache-dependencies.outputs.cache-hit != 'true'
       with:
         node-version: ${{ inputs.node-version }}
         package-manager-cache: false
 
-    - name: Enable Corepack
-      if: (inputs.lookup-only != 'true' || steps.cache-dependencies.outputs.cache-hit != 'true') && steps.resolve-package-manager.outputs.needsCorepack == 'true'
-      shell: bash
-      run: corepack enable
-
-    - name: Configure pnpm store
-      if: steps.resolve-package-manager.outputs.packageManager == 'pnpm' && inputs.lookup-only != 'true'
-      shell: bash
+    - name: Prepare package manager
+      id: prepare-package-manager
+      if: inputs.lookup-only != 'true' || steps.cache-dependencies.outputs.cache-hit != 'true'
+      uses: actions/github-script@v8
       env:
+        CONFIGURE_NODEJS_SETUP_STARTED_AT: ${{ steps.cache-restore-timing.outputs.setupNodeStartedAt }}
         CONFIGURE_NODEJS_ABSOLUTE_WORKING_DIRECTORY: ${{ steps.resolve-cache-paths.outputs.absoluteWorkingDirectory }}
-      run: echo "npm_config_store_dir=$CONFIGURE_NODEJS_ABSOLUTE_WORKING_DIRECTORY/.pnpm-store" >> "$GITHUB_ENV"
+        CONFIGURE_NODEJS_PACKAGE_MANAGER: ${{ steps.resolve-package-manager.outputs.packageManager }}
+        CONFIGURE_NODEJS_PACKAGE_MANAGER_VERSION: ${{ steps.resolve-package-manager.outputs.packageManagerVersion }}
+        CONFIGURE_NODEJS_NEEDS_COREPACK: ${{ steps.resolve-package-manager.outputs.needsCorepack }}
+        CONFIGURE_NODEJS_ABSOLUTE_PRIMARY_CACHE_PATH: ${{ steps.resolve-dependency-cache-paths.outputs.absolutePrimaryCachePath }}
+        CONFIGURE_NODEJS_LOOKUP_ONLY: ${{ inputs.lookup-only }}
+      with:
+        script: |
+          const path = require('path');
+          const cwd = process.env.CONFIGURE_NODEJS_ABSOLUTE_WORKING_DIRECTORY;
+          const manager = process.env.CONFIGURE_NODEJS_PACKAGE_MANAGER;
+          const version = process.env.CONFIGURE_NODEJS_PACKAGE_MANAGER_VERSION;
+          const expectedStorePath =
+            process.env.CONFIGURE_NODEJS_ABSOLUTE_PRIMARY_CACHE_PATH;
+          const setupStartedAt = Number.parseInt(
+            process.env.CONFIGURE_NODEJS_SETUP_STARTED_AT,
+            10,
+          );
+
+          core.setOutput('setupNodeDurationMs', Date.now() - setupStartedAt);
+
+          let activationDurationMs = 0;
+          let storeDiscoveryDurationMs = 0;
+          if (process.env.CONFIGURE_NODEJS_NEEDS_COREPACK === 'true') {
+            const activationStartedAt = Date.now();
+            await exec.exec('corepack', ['enable', manager], { cwd });
+            if (version !== '') {
+              await exec.exec(
+                'corepack',
+                ['prepare', `${manager}@${version}`, '--activate'],
+                { cwd },
+              );
+            }
+
+            const versionResult = await exec.getExecOutput(manager, ['--version'], {
+              cwd,
+              silent: true,
+            });
+            const activatedVersion = versionResult.stdout.trim();
+            const expectedExactVersion = version.split('+')[0];
+            if (
+              /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(expectedExactVersion) &&
+              activatedVersion !== expectedExactVersion
+            ) {
+              throw new Error(
+                `Expected ${manager} ${expectedExactVersion}, got ${activatedVersion}.`,
+              );
+            }
+            core.info(`Activated ${manager} ${activatedVersion}.`);
+            activationDurationMs = Date.now() - activationStartedAt;
+          }
+
+          if (manager === 'pnpm') {
+            const storeDiscoveryStartedAt = Date.now();
+            process.env.npm_config_store_dir = expectedStorePath;
+            if (process.env.CONFIGURE_NODEJS_LOOKUP_ONLY !== 'true') {
+              core.exportVariable('npm_config_store_dir', expectedStorePath);
+            }
+
+            const storeResult = await exec.getExecOutput(
+              'pnpm',
+              ['store', 'path', '--silent'],
+              { cwd, silent: true },
+            );
+            const discoveredStorePath = storeResult.stdout.trim();
+            const normalizeForComparison = (value) => {
+              const normalized = path.resolve(value);
+              return process.platform === 'win32'
+                ? normalized.toLowerCase()
+                : normalized;
+            };
+
+            if (
+              normalizeForComparison(discoveredStorePath) !==
+              normalizeForComparison(expectedStorePath)
+            ) {
+              throw new Error(
+                `Expected pnpm store ${expectedStorePath}, got ${discoveredStorePath}.`,
+              );
+            }
+
+            core.info(`Using pnpm store ${discoveredStorePath}.`);
+            core.setOutput('pnpmStorePath', discoveredStorePath);
+            storeDiscoveryDurationMs = Date.now() - storeDiscoveryStartedAt;
+          }
+          core.setOutput('activationDurationMs', activationDurationMs);
+          core.setOutput('storeDiscoveryDurationMs', storeDiscoveryDurationMs);
 
     - name: Install dependencies
+      id: install-dependencies
       if: steps.cache-dependencies.outputs.cache-hit != 'true' || (steps.resolve-package-manager.outputs.packageManager == 'pnpm' && inputs.lookup-only != 'true')
-      shell: bash
-      working-directory: ${{ steps.resolve-cache-paths.outputs.workingDirectory }}
-      run: ${{ steps.resolve-package-manager.outputs.installCommand }}
+      uses: actions/github-script@v8
+      env:
+        CONFIGURE_NODEJS_ABSOLUTE_WORKING_DIRECTORY: ${{ steps.resolve-cache-paths.outputs.absoluteWorkingDirectory }}
+        CONFIGURE_NODEJS_INSTALL_EXECUTABLE: ${{ steps.resolve-package-manager.outputs.installExecutable }}
+        CONFIGURE_NODEJS_INSTALL_ARGUMENTS: ${{ steps.resolve-package-manager.outputs.installArguments }}
+      with:
+        script: |
+          const startedAt = Date.now();
+          const executable = process.env.CONFIGURE_NODEJS_INSTALL_EXECUTABLE;
+          const args = JSON.parse(process.env.CONFIGURE_NODEJS_INSTALL_ARGUMENTS);
+          await exec.exec(executable, args, {
+            cwd: process.env.CONFIGURE_NODEJS_ABSOLUTE_WORKING_DIRECTORY,
+          });
+          core.setOutput('durationMs', Date.now() - startedAt);
 
     - name: Detect cacheable dependency paths
       id: detect-cache-paths
       if: steps.cache-dependencies.outputs.cache-hit != 'true'
-      shell: bash
+      uses: actions/github-script@v8
       env:
         CONFIGURE_NODEJS_PACKAGE_MANAGER: ${{ steps.resolve-package-manager.outputs.packageManager }}
-        CONFIGURE_NODEJS_PRIMARY_CACHE_PATH: ${{ steps.resolve-dependency-cache-paths.outputs.primaryCachePath }}
-        CONFIGURE_NODEJS_WORKING_DIRECTORY: ${{ steps.resolve-cache-paths.outputs.workingDirectory }}
-      run: |
-        if [ "$CONFIGURE_NODEJS_PACKAGE_MANAGER" = "pnpm" ]; then
-          if [ -e "$CONFIGURE_NODEJS_PRIMARY_CACHE_PATH" ]; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-          fi
-          exit 0
-        fi
+        CONFIGURE_NODEJS_ABSOLUTE_PRIMARY_CACHE_PATH: ${{ steps.resolve-dependency-cache-paths.outputs.absolutePrimaryCachePath }}
+        CONFIGURE_NODEJS_ABSOLUTE_WORKING_DIRECTORY: ${{ steps.resolve-cache-paths.outputs.absoluteWorkingDirectory }}
+      with:
+        script: |
+          const path = require('path');
+          const { pathToFileURL } = require('url');
 
-        if find "$CONFIGURE_NODEJS_WORKING_DIRECTORY" -type d -name node_modules -print -quit | grep -q .; then
-          echo "exists=true" >> "$GITHUB_OUTPUT"
-        else
-          echo "exists=false" >> "$GITHUB_OUTPUT"
-        fi
+          const moduleUrl = pathToFileURL(
+            path.join(process.env.GITHUB_ACTION_PATH, 'scripts', 'detect-cache-paths.mjs'),
+          ).href;
+          const { hasCacheableDependencyPath } = await import(moduleUrl);
+          const exists = hasCacheableDependencyPath({
+            packageManager: process.env.CONFIGURE_NODEJS_PACKAGE_MANAGER,
+            absolutePrimaryCachePath:
+              process.env.CONFIGURE_NODEJS_ABSOLUTE_PRIMARY_CACHE_PATH,
+            absoluteWorkingDirectory:
+              process.env.CONFIGURE_NODEJS_ABSOLUTE_WORKING_DIRECTORY,
+          });
+
+          core.setOutput('exists', exists);
+          core.setOutput('cacheSaveStartedAt', Date.now());
 
     - name: Save dependencies to cache
       if: steps.cache-dependencies.outputs.cache-hit != 'true' && steps.detect-cache-paths.outputs.exists == 'true'
@@ -208,3 +352,77 @@ runs:
       with:
         path: ${{ steps.resolve-dependency-cache-paths.outputs.cachePaths }}
         key: ${{ steps.resolve-dependency-cache-paths.outputs.cacheKeyPrefix }}-${{ inputs.node-version }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.resolve-cache-paths.outputs.workingDirectoryKey }}-${{ steps.resolve-package-manager.outputs.managerCacheKey }}-${{ steps.resolve-package-manager.outputs.lockfileSha }}${{ steps.resolve-cache-paths.outputs.cacheKeySuffixSegment }}
+
+    - name: Report phase timings
+      id: finalize-timings
+      if: always()
+      uses: actions/github-script@v8
+      env:
+        CONFIGURE_NODEJS_ACTION_STARTED_AT: ${{ steps.resolve-cache-paths.outputs.actionStartedAt }}
+        CONFIGURE_NODEJS_CACHE_RESTORE_DURATION_MS: ${{ steps.cache-restore-timing.outputs.cacheRestoreDurationMs }}
+        CONFIGURE_NODEJS_SETUP_NODE_DURATION_MS: ${{ steps.prepare-package-manager.outputs.setupNodeDurationMs }}
+        CONFIGURE_NODEJS_ACTIVATION_DURATION_MS: ${{ steps.prepare-package-manager.outputs.activationDurationMs }}
+        CONFIGURE_NODEJS_STORE_DISCOVERY_DURATION_MS: ${{ steps.prepare-package-manager.outputs.storeDiscoveryDurationMs }}
+        CONFIGURE_NODEJS_INSTALL_DURATION_MS: ${{ steps.install-dependencies.outputs.durationMs }}
+        CONFIGURE_NODEJS_CACHE_SAVE_STARTED_AT: ${{ steps.detect-cache-paths.outputs.cacheSaveStartedAt }}
+        CONFIGURE_NODEJS_CACHE_SAVED: ${{ steps.cache-dependencies.outputs.cache-hit != 'true' && steps.detect-cache-paths.outputs.exists == 'true' }}
+      with:
+        script: |
+          const numberOrZero = (value) => {
+            const parsed = Number.parseInt(value, 10);
+            return Number.isFinite(parsed) ? parsed : 0;
+          };
+          const cacheSaved = process.env.CONFIGURE_NODEJS_CACHE_SAVED === 'true';
+          const cacheSaveStartedAt = numberOrZero(
+            process.env.CONFIGURE_NODEJS_CACHE_SAVE_STARTED_AT,
+          );
+          const actionStartedAt = numberOrZero(
+            process.env.CONFIGURE_NODEJS_ACTION_STARTED_AT,
+          );
+          const timings = {
+            cacheRestoreDurationMs: numberOrZero(
+              process.env.CONFIGURE_NODEJS_CACHE_RESTORE_DURATION_MS,
+            ),
+            setupNodeDurationMs: numberOrZero(
+              process.env.CONFIGURE_NODEJS_SETUP_NODE_DURATION_MS,
+            ),
+            activationDurationMs: numberOrZero(
+              process.env.CONFIGURE_NODEJS_ACTIVATION_DURATION_MS,
+            ),
+            storeDiscoveryDurationMs: numberOrZero(
+              process.env.CONFIGURE_NODEJS_STORE_DISCOVERY_DURATION_MS,
+            ),
+            installDurationMs: numberOrZero(
+              process.env.CONFIGURE_NODEJS_INSTALL_DURATION_MS,
+            ),
+            cacheSaveDurationMs:
+              cacheSaved && cacheSaveStartedAt > 0
+                ? Date.now() - cacheSaveStartedAt
+                : 0,
+            totalDurationMs:
+              actionStartedAt > 0 ? Date.now() - actionStartedAt : 0,
+          };
+
+          for (const [name, value] of Object.entries(timings)) {
+            core.setOutput(name, value);
+          }
+
+          core.notice(
+            `configure-nodejs timings (ms): ${JSON.stringify(timings)}`,
+          );
+          await core.summary
+            .addHeading('configure-nodejs phase timings', 3)
+            .addTable([
+              [
+                { data: 'Phase', header: true },
+                { data: 'Milliseconds', header: true },
+              ],
+              ['Cache restore', String(timings.cacheRestoreDurationMs)],
+              ['Setup Node.js', String(timings.setupNodeDurationMs)],
+              ['Package-manager activation', String(timings.activationDurationMs)],
+              ['pnpm store discovery', String(timings.storeDiscoveryDurationMs)],
+              ['Dependency install', String(timings.installDurationMs)],
+              ['Cache save', String(timings.cacheSaveDurationMs)],
+              ['Total action', String(timings.totalDurationMs)],
+            ])
+            .write();

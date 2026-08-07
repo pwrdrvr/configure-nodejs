@@ -142,6 +142,11 @@ export function buildResult({
   const normalizedCacheKeySuffix = normalizeCacheKeySuffix(cacheKeySuffix);
   const normalizedPackageManager = normalizePackageManager(packageManager);
 
+  const primaryCachePath = buildPrimaryCachePath(
+    resolvedWorkingDirectory.workingDirectory,
+    normalizedPackageManager,
+  );
+
   return {
     absoluteWorkingDirectory: resolvedWorkingDirectory.absoluteWorkingDirectory,
     workingDirectory: resolvedWorkingDirectory.workingDirectory,
@@ -152,10 +157,8 @@ export function buildResult({
       resolvedWorkingDirectory.workingDirectory,
       normalizedPackageManager,
     ),
-    primaryCachePath: buildPrimaryCachePath(
-      resolvedWorkingDirectory.workingDirectory,
-      normalizedPackageManager,
-    ),
+    primaryCachePath,
+    absolutePrimaryCachePath: path.resolve(cwd, primaryCachePath),
     cacheKeyPrefix: buildCacheKeyPrefix(normalizedPackageManager),
     cacheKeySuffix: normalizedCacheKeySuffix,
     cacheKeySuffixSegment:
