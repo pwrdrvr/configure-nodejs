@@ -205,6 +205,37 @@ test('installation is gated on the resolved shouldInstall decision', () => {
   );
 });
 
+test('the README documents exactly the outputs the action declares', () => {
+  // Adding an output and forgetting the docs is silent, and the count in the
+  // collapsed <summary> goes stale even more quietly.
+  const readmePath = path.join(path.dirname(actionPath), 'README.md');
+  const readme = fs.readFileSync(readmePath, 'utf8');
+
+  const outputsBlock = actionYaml.slice(
+    actionYaml.indexOf('\noutputs:'),
+    actionYaml.indexOf('\nruns:'),
+  );
+  const declared = linesOf(outputsBlock)
+    .map((line) => /^ {2}([a-z][a-z0-9-]*):$/.exec(line))
+    .filter(Boolean)
+    .map((match) => match[1]);
+
+  assert.ok(declared.length > 0, 'failed to parse outputs out of action.yml');
+
+  const undocumented = declared.filter(
+    (name) => !readme.includes(`| \`${name}\` |`),
+  );
+  assert.deepEqual(undocumented, [], 'outputs missing from the README table');
+
+  const claimed = /All (\d+) outputs/.exec(readme);
+  assert.ok(claimed, 'the README no longer states how many outputs there are');
+  assert.equal(
+    Number(claimed[1]),
+    declared.length,
+    'the README output count does not match action.yml',
+  );
+});
+
 test('every inline github-script body parses', () => {
   const AsyncFunction = Object.getPrototypeOf(async function noop() {}).constructor;
   const blocks = inlineScripts();

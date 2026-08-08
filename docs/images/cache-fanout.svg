@@ -1,0 +1,133 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="940" height="512" viewBox="0 0 940 512" role="img" aria-label="Timeline comparison: without a gate job every parallel job pays for the same cache miss; with a gate job only one job installs cold and the rest restore.">
+  <style>
+    .card   { fill: #ffffff; stroke: #d1d9e0; }
+    .title  { fill: #1f2328; font: 600 14px -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+    .sub    { fill: #59636e; font: 12px -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+    .strong { fill: #1f2328; font: 600 12px -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+    .lane   { fill: #1f2328; font: 12px -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+    .tiny   { fill: #8c959f; font: 10px -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+    .grid   { stroke: #eaeef2; stroke-width: 1; }
+    .rule   { stroke: #d1d9e0; stroke-width: 1; }
+    .cold   { fill: #e5534b; }
+    .warm   { fill: #2da44e; }
+    .work   { fill: #4493f8; }
+    .gate   { fill: #8250df; font: 600 12px -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+    .gateband { fill: #8250df; opacity: 0.14; }
+    .bad    { fill: #cf222e; font: 600 12px -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+    .good   { fill: #1a7f37; font: 600 12px -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+    @media (prefers-color-scheme: dark) {
+      .card   { fill: #0d1117; stroke: #30363d; }
+      .title  { fill: #e6edf3; }
+      .sub    { fill: #9198a1; }
+      .strong { fill: #e6edf3; }
+      .lane   { fill: #e6edf3; }
+      .tiny   { fill: #6e7681; }
+      .grid   { stroke: #21262d; }
+      .rule   { stroke: #30363d; }
+      .cold   { fill: #f85149; }
+      .warm   { fill: #3fb950; }
+      .work   { fill: #388bfd; }
+      .gate   { fill: #a371f7; }
+      .gateband { fill: #a371f7; opacity: 0.20; }
+      .bad    { fill: #ff7b72; }
+      .good   { fill: #3fb950; }
+    }
+  </style>
+
+  <rect class="card" x="0.5" y="0.5" width="939" height="511" rx="12"/>
+
+  <!-- legend -->
+  <rect class="cold" x="474" y="19" width="10" height="10" rx="2"/>
+  <text class="tiny" x="490" y="28">cold install</text>
+  <rect class="warm" x="562" y="19" width="10" height="10" rx="2"/>
+  <text class="tiny" x="578" y="28">cache restore</text>
+  <rect class="work" x="662" y="19" width="10" height="10" rx="2"/>
+  <text class="tiny" x="678" y="28">job work</text>
+  <rect class="gateband" x="742" y="19" width="10" height="10" rx="2"/>
+  <text class="tiny" x="758" y="28">gate job</text>
+
+  <!-- ===================== PANEL A ===================== -->
+  <text class="title" x="24" y="30">Without a gate job — one cache miss, five cold installs</text>
+
+  <line class="grid" x1="150.5" y1="46" x2="150.5" y2="196"/>
+  <line class="grid" x1="263.5" y1="46" x2="263.5" y2="196"/>
+  <line class="grid" x1="376.5" y1="46" x2="376.5" y2="196"/>
+  <line class="grid" x1="489.5" y1="46" x2="489.5" y2="196"/>
+  <line class="grid" x1="602.5" y1="46" x2="602.5" y2="196"/>
+  <line class="grid" x1="715.5" y1="46" x2="715.5" y2="196"/>
+  <line class="grid" x1="828.5" y1="46" x2="828.5" y2="196"/>
+
+  <text class="lane" x="24" y="68">Lint</text>
+  <rect class="cold" x="150" y="56" width="113" height="16" rx="3"/>
+  <rect class="work" x="264" y="56" width="263" height="16" rx="3"/>
+
+  <text class="lane" x="24" y="96">Build</text>
+  <rect class="cold" x="150" y="84" width="113" height="16" rx="3"/>
+  <rect class="work" x="264" y="84" width="94" height="16" rx="3"/>
+
+  <text class="lane" x="24" y="124">Test</text>
+  <rect class="cold" x="150" y="112" width="113" height="16" rx="3"/>
+  <rect class="work" x="264" y="112" width="376" height="16" rx="3"/>
+  <text class="bad" x="650" y="124">✗ fails → cache save skipped</text>
+
+  <text class="lane" x="24" y="152">Desktop E2E</text>
+  <rect class="cold" x="150" y="140" width="113" height="16" rx="3"/>
+  <rect class="work" x="264" y="140" width="564" height="16" rx="3"/>
+
+  <text class="lane" x="24" y="180">Windows</text>
+  <rect class="cold" x="150" y="168" width="113" height="16" rx="3"/>
+  <rect class="work" x="264" y="168" width="414" height="16" rx="3"/>
+
+  <text class="strong" x="24" y="218">5 × cold install = 5m00s of dependency setup</text>
+  <text class="sub" x="332" y="218">· the same dependency tree pulled 5 times · 5 jobs race for one cache key</text>
+
+  <line class="rule" x1="24" y1="238" x2="916" y2="238"/>
+
+  <!-- ===================== PANEL B ===================== -->
+  <text class="title" x="24" y="266">With a gate job — one cache miss, one cold install</text>
+
+  <line class="grid" x1="150.5" y1="282" x2="150.5" y2="452"/>
+  <line class="grid" x1="263.5" y1="282" x2="263.5" y2="452"/>
+  <line class="grid" x1="376.5" y1="282" x2="376.5" y2="452"/>
+  <line class="grid" x1="489.5" y1="282" x2="489.5" y2="452"/>
+  <line class="grid" x1="602.5" y1="282" x2="602.5" y2="452"/>
+  <line class="grid" x1="715.5" y1="282" x2="715.5" y2="452"/>
+  <line class="grid" x1="828.5" y1="282" x2="828.5" y2="452"/>
+
+  <rect class="gateband" x="16" y="282" width="900" height="28" rx="6"/>
+  <text class="gate" x="24" y="300">install-deps</text>
+  <rect class="cold" x="150" y="288" width="113" height="16" rx="3"/>
+  <text class="good" x="271" y="300">✓ cache saved — before any test can fail</text>
+
+  <text class="lane" x="24" y="334">Lint</text>
+  <rect class="warm" x="274" y="322" width="19" height="16" rx="3"/>
+  <rect class="work" x="294" y="322" width="263" height="16" rx="3"/>
+
+  <text class="lane" x="24" y="362">Build</text>
+  <rect class="warm" x="274" y="350" width="19" height="16" rx="3"/>
+  <rect class="work" x="294" y="350" width="94" height="16" rx="3"/>
+
+  <text class="lane" x="24" y="390">Test</text>
+  <rect class="warm" x="274" y="378" width="19" height="16" rx="3"/>
+  <rect class="work" x="294" y="378" width="376" height="16" rx="3"/>
+  <text class="good" x="680" y="390">✗ fails → retry still restores in 10s</text>
+
+  <text class="lane" x="24" y="418">Desktop E2E</text>
+  <rect class="warm" x="274" y="406" width="19" height="16" rx="3"/>
+  <rect class="work" x="294" y="406" width="564" height="16" rx="3"/>
+
+  <text class="lane" x="24" y="446">Windows</text>
+  <rect class="warm" x="274" y="434" width="19" height="16" rx="3"/>
+  <rect class="work" x="294" y="434" width="414" height="16" rx="3"/>
+
+  <text class="tiny" x="150" y="470">0s</text>
+  <text class="tiny" x="263" y="470">60s</text>
+  <text class="tiny" x="376" y="470">120s</text>
+  <text class="tiny" x="489" y="470">180s</text>
+  <text class="tiny" x="602" y="470">240s</text>
+  <text class="tiny" x="715" y="470">300s</text>
+  <text class="tiny" x="828" y="470">360s</text>
+
+  <text class="strong" x="24" y="496">1 × cold install + 5 × restore = 1m50s of dependency setup</text>
+  <text class="sub" x="404" y="496">· one writer, no race · +15s wall clock · warm for every retry</text>
+</svg>
