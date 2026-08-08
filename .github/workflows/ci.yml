@@ -69,6 +69,12 @@ jobs:
           working-directory: ${{ env.FIXTURE }}
           cache-key-suffix: ${{ env.PINNED_SUFFIX }}
 
+      # The tree was installed under 24.14.1 and restored under 24.x. Actually
+      # importing it is what proves the shared entry is usable, not just present.
+      - name: Validate the dependency restored across patch versions
+        working-directory: ${{ env.FIXTURE }}
+        run: node check.mjs
+
       - name: Remove materialized dependencies
         run: rm -rf "${FIXTURE}/node_modules"
 

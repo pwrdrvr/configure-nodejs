@@ -7,6 +7,8 @@ import {
   detectNodeMajorMismatch,
   extractNodeMajor,
   parseNodeVersionSpec,
+  shouldDiscardRestoredDependencies,
+  shouldInstallDependencies,
 } from '../scripts/resolve-node-version.mjs';
 
 const PINNED_SPECS = [
@@ -23,6 +25,8 @@ const PINNED_SPECS = [
   ['24-nightly', 24],
   ['24.0.0-nightly20240101abcdef', 24],
   ['  20.11.0  ', 20],
+  ['^ 24.1.0', 24],
+  ['~ 22', 22],
 ];
 
 for (const [spec, major] of PINNED_SPECS) {
@@ -50,6 +54,10 @@ const FLOATING_SPECS = [
   ['>20.1.0', 'open-ended-range'],
   ['<=24', 'open-ended-range'],
   ['<24', 'open-ended-range'],
+  // One comparator written with a space is still one comparator, not a
+  // compound range -- the classification is the same either way, but the
+  // reason is logged and should not mislead.
+  ['>= 20', 'open-ended-range'],
   ['>=20 <21', 'compound-range'],
   ['20 || 22', 'compound-range'],
   ['20||22', 'compound-range'],
@@ -198,4 +206,115 @@ test('detectNodeMajorMismatch reports a spec that resolved outside its parsed ma
     }),
     { cacheKeyNodeMajor: 22, installedMajor: 24 },
   );
+});
+
+const MISMATCH = { cacheKeyNodeMajor: 22, installedMajor: 24 };
+
+test('shouldDiscardRestoredDependencies only fires on a restored node_modules tree', () => {
+  for (const packageManager of ['npm', 'yarn']) {
+    assert.equal(
+      shouldDiscardRestoredDependencies({
+        packageManager,
+        cacheHit: true,
+        mismatch: MISMATCH,
+      }),
+      true,
+      `${packageManager} restores node_modules verbatim and must discard it`,
+    );
+  }
+
+  // Nothing was restored, so there is nothing to delete.
+  assert.equal(
+    shouldDiscardRestoredDependencies({
+      packageManager: 'npm',
+      cacheHit: false,
+      mismatch: MISMATCH,
+    }),
+    false,
+  );
+
+  // pnpm caches the store, not node_modules, and reinstalls regardless.
+  assert.equal(
+    shouldDiscardRestoredDependencies({
+      packageManager: 'pnpm',
+      cacheHit: true,
+      mismatch: MISMATCH,
+    }),
+    false,
+  );
+
+  assert.equal(
+    shouldDiscardRestoredDependencies({
+      packageManager: 'npm',
+      cacheHit: true,
+      mismatch: null,
+    }),
+    false,
+  );
+});
+
+test('shouldInstallDependencies installs whenever the cache did not hit', () => {
+  for (const packageManager of ['npm', 'yarn', 'pnpm']) {
+    for (const lookupOnly of [true, false]) {
+      assert.equal(
+        shouldInstallDependencies({
+          packageManager,
+          cacheHit: false,
+          lookupOnly,
+          mismatch: null,
+        }),
+        true,
+      );
+    }
+  }
+});
+
+test('shouldInstallDependencies skips npm and Yarn on a clean cache hit', () => {
+  for (const packageManager of ['npm', 'yarn']) {
+    assert.equal(
+      shouldInstallDependencies({
+        packageManager,
+        cacheHit: true,
+        lookupOnly: false,
+        mismatch: null,
+      }),
+      false,
+    );
+  }
+});
+
+test('shouldInstallDependencies still installs pnpm on a hit unless lookup-only', () => {
+  assert.equal(
+    shouldInstallDependencies({
+      packageManager: 'pnpm',
+      cacheHit: true,
+      lookupOnly: false,
+      mismatch: null,
+    }),
+    true,
+  );
+  assert.equal(
+    shouldInstallDependencies({
+      packageManager: 'pnpm',
+      cacheHit: true,
+      lookupOnly: true,
+      mismatch: null,
+    }),
+    false,
+  );
+});
+
+test('shouldInstallDependencies overrides a cache hit on an ABI mismatch', () => {
+  for (const packageManager of ['npm', 'yarn', 'pnpm']) {
+    assert.equal(
+      shouldInstallDependencies({
+        packageManager,
+        cacheHit: true,
+        lookupOnly: false,
+        mismatch: MISMATCH,
+      }),
+      true,
+      `${packageManager} must reinstall rather than run against a mismatched ABI`,
+    );
+  }
 });

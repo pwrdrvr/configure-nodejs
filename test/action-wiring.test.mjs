@@ -17,10 +17,44 @@ const actionPath = path.join(
 const actionYaml = fs.readFileSync(actionPath, 'utf8');
 const actionLines = actionYaml.split('\n');
 
-function lineIndexOf(trimmedLine) {
-  const index = actionLines.findIndex((line) => line.trim() === trimmedLine);
-  assert.notEqual(index, -1, `action.yml has no line "${trimmedLine}"`);
-  return index;
+// Locates a step by its `id:` and returns every line belonging to that step,
+// so assertions can look for a key anywhere inside it. Reading the step as a
+// block rather than at a fixed offset from the id keeps a harmless reordering
+// of `uses:`/`if:` from failing as if it were a cache-key regression.
+function stepBlock(id) {
+  const start = actionLines.findIndex((line) => line.trim() === `id: ${id}`);
+  assert.notEqual(start, -1, `action.yml has no step with id "${id}"`);
+
+  // Walk back to the `- name:` that opens the step, then forward to the next.
+  const isStepStart = (line) => /^\s*- name: /.test(line);
+  let first = start;
+  while (first > 0 && !isStepStart(actionLines[first])) {
+    first -= 1;
+  }
+
+  let last = first + 1;
+  while (last < actionLines.length && !isStepStart(actionLines[last])) {
+    last += 1;
+  }
+
+  return { first, last, lines: actionLines.slice(first, last) };
+}
+
+// The value of a top-level key within a step, e.g. `if` or `uses`. Only the
+// step's own keys are considered, not keys nested under `with:`/`env:`.
+function stepValue(id, key) {
+  const { lines } = stepBlock(id);
+  const indent = /^(\s*)- /.exec(lines[0])[1].length + 2;
+  const pattern = new RegExp(`^ {${indent}}${key}: (.*)$`);
+
+  for (const line of lines) {
+    const match = pattern.exec(line);
+    if (match) {
+      return match[1].trim();
+    }
+  }
+
+  return null;
 }
 
 function cacheKeyLines() {
@@ -38,18 +72,36 @@ function inlineScripts() {
       continue;
     }
 
-    const bodyIndent = match[1].length + 2;
+    // A YAML block scalar takes its indentation from the first non-empty line,
+    // not from a fixed offset off the parent key. Deriving it keeps an
+    // unexpectedly indented body from silently extracting as an empty string,
+    // which would then "parse" and pass.
+    const parentIndent = match[1].length;
     const body = [];
+    let bodyIndent = null;
     let cursor = index + 1;
+
     while (cursor < actionLines.length) {
       const line = actionLines[cursor];
-      if (line.trim() !== '' && line.search(/\S/) < bodyIndent) {
+      const contentAt = line.search(/\S/);
+
+      if (contentAt !== -1 && contentAt <= parentIndent) {
         break;
       }
-      body.push(line.slice(bodyIndent));
+
+      if (bodyIndent === null && contentAt !== -1) {
+        bodyIndent = contentAt;
+      }
+
+      body.push(bodyIndent === null ? '' : line.slice(bodyIndent));
       cursor += 1;
     }
 
+    assert.notEqual(
+      bodyIndent,
+      null,
+      `action.yml:${index + 1} declares an empty script block`,
+    );
     blocks.push({ line: index + 1, body: body.join('\n') });
     index = cursor - 1;
   }
@@ -83,23 +135,22 @@ test('the dependency cache key is built from the resolved Node.js major', () => 
 });
 
 test('exactly one of the two setup-node steps runs, chosen by the version spec', () => {
-  const floatingIfLine = actionLines[lineIndexOf('id: setup-node-floating') + 1];
-  const pinnedIfLine = actionLines[lineIndexOf('id: setup-node') + 2];
-
-  assert.match(
-    floatingIfLine,
-    /^\s*if: steps\.resolve-cache-paths\.outputs\.nodeVersionIsFloating == 'true'\s*$/,
+  assert.equal(
+    stepValue('setup-node-floating', 'if'),
+    "steps.resolve-cache-paths.outputs.nodeVersionIsFloating == 'true'",
   );
   assert.match(
-    pinnedIfLine,
-    /^\s*if: steps\.resolve-cache-paths\.outputs\.nodeVersionIsFloating != 'true' &&/,
+    stepValue('setup-node', 'if'),
+    /^steps\.resolve-cache-paths\.outputs\.nodeVersionIsFloating != 'true' &&/,
   );
+  assert.equal(stepValue('setup-node-floating', 'uses'), 'actions/setup-node@v6');
+  assert.equal(stepValue('setup-node', 'uses'), 'actions/setup-node@v6');
 });
 
 test('a floating spec resolves Node before the restore, a pinned spec after', () => {
-  const floating = lineIndexOf('id: setup-node-floating');
-  const restore = lineIndexOf('id: cache-dependencies');
-  const pinned = lineIndexOf('id: setup-node');
+  const floating = stepBlock('setup-node-floating').first;
+  const restore = stepBlock('cache-dependencies').first;
+  const pinned = stepBlock('setup-node').first;
 
   assert.ok(
     floating < restore,
@@ -112,20 +163,19 @@ test('a floating spec resolves Node before the restore, a pinned spec after', ()
 });
 
 test('the pinned fast path still lets lookup-only skip Node installation on a hit', () => {
-  const pinnedIfLine = actionLines[lineIndexOf('id: setup-node') + 2];
-
   assert.match(
-    pinnedIfLine,
+    stepValue('setup-node', 'if'),
     /\(inputs\.lookup-only != 'true' \|\| steps\.cache-dependencies\.outputs\.cache-hit != 'true'\)/,
   );
 });
 
-test('a Node major mismatch forces a reinstall even on a cache hit', () => {
-  const installIfLine = actionLines[lineIndexOf('id: install-dependencies') + 1];
-
-  assert.match(
-    installIfLine,
-    /steps\.prepare-package-manager\.outputs\.nodeMajorMismatch == 'true'/,
+test('installation is gated on the resolved shouldInstall decision', () => {
+  // The three reasons an install can be required live in
+  // shouldInstallDependencies, where they are unit tested. The step condition
+  // must not drift into re-deriving them.
+  assert.equal(
+    stepValue('install-dependencies', 'if'),
+    "steps.prepare-package-manager.outputs.shouldInstall == 'true'",
   );
 });
 

@@ -77,13 +77,18 @@ export function parseNodeVersionSpec(nodeVersion) {
     return floating(spec, 'moving-alias');
   }
 
+  // `>= 20` is one comparator written with a space, not a compound range, so
+  // close that gap before counting comparators. Whitespace that separates two
+  // comparators (`>=20 <21`) survives this and is classified below.
+  const normalized = spec.replace(/^([<>]=?|=|~|\^)\s+/, '$1');
+
   // Compound ranges (`>=20 <21`, `20 || 22`) can be single-major, but proving
   // it means intersecting comparator sets. Not worth the failure modes.
-  if (/\s/.test(spec) || spec.includes('||')) {
+  if (/\s/.test(normalized) || normalized.includes('||')) {
     return floating(spec, 'compound-range');
   }
 
-  const match = SPEC_PATTERN.exec(spec);
+  const match = SPEC_PATTERN.exec(normalized);
   if (!match) {
     return floating(spec, 'unrecognized');
   }
@@ -167,6 +172,41 @@ export function detectNodeMajorMismatch({
   }
 
   return { cacheKeyNodeMajor: keyedMajor, installedMajor };
+}
+
+// npm and Yarn cache node_modules itself, so a mismatched restore has to be
+// deleted before the install can correct it. pnpm caches a content-addressed
+// store and reinstalls on every run, so there is nothing to discard.
+export function shouldDiscardRestoredDependencies({
+  packageManager,
+  cacheHit,
+  mismatch,
+}) {
+  return Boolean(mismatch) && cacheHit === true && packageManager !== 'pnpm';
+}
+
+// Kept here rather than in a step `if:` expression so the three reasons an
+// install can be required stay readable and testable. A caller that skips the
+// step this runs in (lookup-only on a cache hit) never installs, which is the
+// same answer this returns for that input.
+export function shouldInstallDependencies({
+  packageManager,
+  cacheHit,
+  lookupOnly,
+  mismatch,
+}) {
+  if (cacheHit !== true) {
+    return true;
+  }
+
+  // The restored tree was built against a different Node.js ABI.
+  if (mismatch) {
+    return true;
+  }
+
+  // pnpm's cache is the store, not node_modules, so a hit still has to install
+  // unless the caller only wanted to know whether the entry exists.
+  return packageManager === 'pnpm' && lookupOnly !== true;
 }
 
 export function main(argv = process.argv.slice(2)) {

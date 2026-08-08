@@ -173,6 +173,12 @@ runs:
     # itself, so it runs first and the fast path is given up for those specs only.
     # In practice a floating spec resolves to a version already in the runner
     # toolcache, which makes this a PATH update rather than a download.
+    #
+    # pnpm reinstalls on every run, so it could in principle keep the fast path
+    # by dropping the major from its key. That is left alone deliberately: the
+    # key already separated pnpm stores by Node version before this change, and
+    # removing that separation would rest on an unverified assumption about how
+    # pnpm keys build side effects inside its store.
     - name: Setup Node.js for floating version spec
       id: setup-node-floating
       if: steps.resolve-cache-paths.outputs.nodeVersionIsFloating == 'true'
@@ -329,7 +335,13 @@ runs:
           const nodeVersionModuleUrl = pathToFileURL(
             path.join(process.env.GITHUB_ACTION_PATH, 'scripts', 'resolve-node-version.mjs'),
           ).href;
-          const { detectNodeMajorMismatch } = await import(nodeVersionModuleUrl);
+          const {
+            detectNodeMajorMismatch,
+            shouldDiscardRestoredDependencies,
+            shouldInstallDependencies,
+          } = await import(nodeVersionModuleUrl);
+          const cacheHit = process.env.CONFIGURE_NODEJS_CACHE_HIT === 'true';
+          const lookupOnly = process.env.CONFIGURE_NODEJS_LOOKUP_ONLY === 'true';
           const mismatch = detectNodeMajorMismatch({
             cacheKeyNodeMajor: process.env.CONFIGURE_NODEJS_NODE_CACHE_KEY_MAJOR,
             installedNodeVersion:
@@ -337,21 +349,33 @@ runs:
           });
           if (mismatch) {
             core.warning(
-              `Node.js version "${process.env.CONFIGURE_NODEJS_NODE_VERSION}" was treated as pinned to major ${mismatch.cacheKeyNodeMajor}, but actions/setup-node installed major ${mismatch.installedMajor}. Discarding the restored dependencies and reinstalling so native addons match the running ABI. Please report this version spec to pwrdrvr/configure-nodejs.`,
+              `Node.js version "${process.env.CONFIGURE_NODEJS_NODE_VERSION}" was treated as pinned to major ${mismatch.cacheKeyNodeMajor}, but actions/setup-node installed major ${mismatch.installedMajor}. Discarding the restored dependencies and reinstalling so native addons match the running ABI. The cache entry cannot be corrected under a key that already exists, so every run will reinstall until the lockfile changes -- please report this version spec to pwrdrvr/configure-nodejs so the classifier can be fixed.`,
             );
-            if (
-              manager !== 'pnpm' &&
-              process.env.CONFIGURE_NODEJS_CACHE_HIT === 'true'
-            ) {
-              // For npm and Yarn the primary cache path is node_modules itself.
-              // pnpm caches a content-addressed store and reinstalls anyway.
-              fs.rmSync(process.env.CONFIGURE_NODEJS_ABSOLUTE_PRIMARY_CACHE_PATH, {
-                recursive: true,
-                force: true,
-              });
-            }
           }
-          core.setOutput('nodeMajorMismatch', String(Boolean(mismatch)));
+          if (
+            shouldDiscardRestoredDependencies({
+              packageManager: manager,
+              cacheHit,
+              mismatch,
+            })
+          ) {
+            // For npm and Yarn the primary cache path is node_modules itself.
+            fs.rmSync(process.env.CONFIGURE_NODEJS_ABSOLUTE_PRIMARY_CACHE_PATH, {
+              recursive: true,
+              force: true,
+            });
+          }
+          core.setOutput(
+            'shouldInstall',
+            String(
+              shouldInstallDependencies({
+                packageManager: manager,
+                cacheHit,
+                lookupOnly,
+                mismatch,
+              }),
+            ),
+          );
 
           let activationDurationMs = 0;
           let storeDiscoveryDurationMs = 0;
@@ -427,7 +451,7 @@ runs:
 
     - name: Install dependencies
       id: install-dependencies
-      if: steps.cache-dependencies.outputs.cache-hit != 'true' || steps.prepare-package-manager.outputs.nodeMajorMismatch == 'true' || (steps.resolve-package-manager.outputs.packageManager == 'pnpm' && inputs.lookup-only != 'true')
+      if: steps.prepare-package-manager.outputs.shouldInstall == 'true'
       uses: actions/github-script@v8
       env:
         CONFIGURE_NODEJS_ABSOLUTE_WORKING_DIRECTORY: ${{ steps.resolve-cache-paths.outputs.absoluteWorkingDirectory }}
