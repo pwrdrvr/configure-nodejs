@@ -133,7 +133,9 @@ jobs:
 On a hit the gate does not even install Node.js. It answers a question and exits. On a miss it pays the install once, writes the cache immediately — not in a post step, not conditionally — and every downstream job restores. Because the gate contains no build, lint, or tests, it has almost no failure surface, which is exactly what you want in the job responsible for writing your cache.
 
 > [!IMPORTANT]
-> **The gate and its consumers must agree on every input that feeds the cache key**: `node-version`, `working-directory`, `package-manager`, `cache-key-suffix`, and the runner OS and architecture. `node-version` is used *literally*, not resolved — a gate on `24.x` and a consumer on `24.14.1` are two different keys. Mismatch it and the gate warms a key nobody reads: no error, no warning, just the naive behavior plus an extra job.
+> **The gate and its consumers must agree on every input that feeds the cache key**: `node-version`, `working-directory`, `package-manager`, `cache-key-suffix`, and the runner OS and architecture. Mismatch it and the gate warms a key nobody reads: no error, no warning, just the naive behavior plus an extra job.
+>
+> `node-version` contributes only its **major**, so a gate on `24.x` and a consumer on `24.14.1` do share a key — but a gate on `24.x` and a consumer on `22.x` do not, and neither matches one on `lts/*` in a year when `lts/*` is not 24.
 
 ```mermaid
 flowchart LR
@@ -223,7 +225,7 @@ By the time `Test` ran the cache was already written. If `Test` had failed, the 
 
 | Input | Default | Description |
 | --- | --- | --- |
-| `node-version` | `22.x` | Node.js version to install with `actions/setup-node`. Used literally in the cache key |
+| `node-version` | `22.x` | Node.js version to install with `actions/setup-node`. Only its **major** reaches the cache key. A spec that can cross a major (`lts/*`, `latest`, `>=20`) must be resolved by `actions/setup-node` first, so those specs install Node.js even when `lookup-only` hits |
 | `package-manager` | `""` | Optional override for `npm`, `pnpm`, or `yarn`; by default the action follows the package manager inferred from `package.json` and the lockfile present |
 | `working-directory` | `"."` | Repository-relative directory containing `package.json` and the lockfile |
 | `cache-key-suffix` | `""` | Optional suffix appended to the dependency cache key when you want to namespace cache entries |
@@ -231,7 +233,9 @@ By the time `Test` ran the cache was already written. If `Test` had failed, the 
 
 ### Caching behavior
 
-The cache key is built from `node-version`, runner OS and architecture, normalized working directory, resolved package manager and version, the lockfile SHA, and `cache-key-suffix`.
+The cache key is built from the Node.js **major**, runner OS and architecture, normalized working directory, resolved package manager and version, the lockfile SHA, and `cache-key-suffix`.
+
+The major is what matters because `NODE_MODULE_VERSION` — the ABI every compiled native addon in `node_modules` is built against — changes with each Node.js major and is stable within one. For npm and Yarn the action skips installation entirely on a hit, so a tree built under one major must never be restored under another. A pinned `node-version` supplies the major from the string alone and keeps the restore-before-`setup-node` fast path; a spec that can cross a major has to be resolved by `actions/setup-node` first, which is why those specs install Node.js even on a `lookup-only` hit.
 
 | Package manager | Cached path | On a cache hit |
 | --- | --- | --- |
@@ -242,7 +246,7 @@ The cache key is built from `node-version`, runner OS and architecture, normaliz
 For pnpm, `cache-hit` means *the store cache was found*. It does not mean `node_modules` was restored. Cache paths and keys are scoped to `working-directory`, so subdirectory apps in a monorepo stay isolated. The action exports `npm_config_store_dir` for later workflow steps so follow-up pnpm commands use the same store.
 
 <details>
-<summary><b>All 18 outputs</b> — <code>package-manager</code>, <code>lockfile-sha</code>, <code>cache-hit</code>, <code>pnpm-store-path</code>, <code>install-command</code>, and per-phase timings in milliseconds.</summary>
+<summary><b>All 19 outputs</b> — <code>package-manager</code>, <code>lockfile-sha</code>, <code>cache-hit</code>, <code>node-major</code>, <code>pnpm-store-path</code>, <code>install-command</code>, and per-phase timings in milliseconds.</summary>
 
 | Output | Description |
 | --- | --- |
@@ -256,6 +260,7 @@ For pnpm, `cache-hit` means *the store cache was found*. It does not mean `node_
 | `working-directory` | Normalized working directory |
 | `working-directory-key` | Cache-key-safe working-directory identifier |
 | `cache-hit` | `true` when the dependency cache entry exists for the computed key |
+| `node-major` | Node.js major version the dependency cache key was built from |
 | `pnpm-store-path` | Absolute workspace-local pnpm store path when pnpm setup runs |
 | `cache-restore-duration-ms` | Measured cache restore phase duration |
 | `setup-node-duration-ms` | Measured `actions/setup-node` phase duration |

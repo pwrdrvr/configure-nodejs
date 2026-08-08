@@ -49,6 +49,9 @@ outputs:
   cache-hit:
     description: "Whether actions/cache restored a dependency cache entry"
     value: ${{ steps.cache-dependencies.outputs.cache-hit }}
+  node-major:
+    description: "Node.js major version the dependency cache key was built from"
+    value: ${{ steps.resolve-dependency-cache-paths.outputs.nodeMajor }}
   pnpm-store-path:
     description: "Absolute pnpm store path when pnpm setup runs"
     value: ${{ steps.prepare-package-manager.outputs.pnpmStorePath }}
@@ -77,12 +80,13 @@ outputs:
 runs:
   using: "composite"
   steps:
-    - name: Resolve working directory
+    - name: Resolve working directory and Node.js version spec
       id: resolve-cache-paths
       uses: actions/github-script@v8
       env:
         CONFIGURE_NODEJS_WORKING_DIRECTORY: ${{ inputs.working-directory }}
         CONFIGURE_NODEJS_CACHE_KEY_SUFFIX: ${{ inputs.cache-key-suffix }}
+        CONFIGURE_NODEJS_NODE_VERSION: ${{ inputs.node-version }}
       with:
         script: |
           const actionStartedAt = Date.now();
@@ -95,6 +99,10 @@ runs:
           const {
             buildResult,
           } = await import(moduleUrl);
+          const nodeVersionModuleUrl = pathToFileURL(
+            path.join(process.env.GITHUB_ACTION_PATH, 'scripts', 'resolve-node-version.mjs'),
+          ).href;
+          const { parseNodeVersionSpec } = await import(nodeVersionModuleUrl);
 
           const result = buildResult({
             cwd: process.env.GITHUB_WORKSPACE,
@@ -108,6 +116,16 @@ runs:
           core.setOutput('cacheKeySuffix', result.cacheKeySuffix);
           core.setOutput('cacheKeySuffixSegment', result.cacheKeySuffixSegment);
           core.setOutput('actionStartedAt', actionStartedAt);
+
+          const nodeVersionSpec = parseNodeVersionSpec(
+            process.env.CONFIGURE_NODEJS_NODE_VERSION,
+          );
+          core.setOutput('nodeVersionIsFloating', String(nodeVersionSpec.isFloating));
+          core.info(
+            nodeVersionSpec.isFloating
+              ? `Node.js version "${nodeVersionSpec.spec}" can span major versions (${nodeVersionSpec.reason}); resolving it with actions/setup-node before restoring the dependency cache.`
+              : `Node.js version "${nodeVersionSpec.spec}" pins major ${nodeVersionSpec.major}; restoring the dependency cache before installing Node.js.`,
+          );
 
     - name: Resolve package manager
       id: resolve-package-manager
@@ -143,6 +161,31 @@ runs:
           core.setOutput('installExecutable', result.installExecutable);
           core.setOutput('installArguments', JSON.stringify(result.installArguments));
           core.setOutput('needsCorepack', result.needsCorepack);
+          core.setOutput('setupNodeStartedAt', Date.now());
+
+    # The dependency cache key has to carry the Node.js major that will actually
+    # run the restored tree, because NODE_MODULE_VERSION -- and therefore the ABI
+    # every compiled native addon in node_modules was built against -- changes
+    # with each major. A pinned spec supplies that major from the string alone, so
+    # the restore stays ahead of setup-node and `lookup-only` can still skip
+    # installing Node entirely on a hit. A spec that can cross a major (lts/*,
+    # latest, >=20) has no such shortcut: the only source of truth is setup-node
+    # itself, so it runs first and the fast path is given up for those specs only.
+    # In practice a floating spec resolves to a version already in the runner
+    # toolcache, which makes this a PATH update rather than a download.
+    #
+    # pnpm reinstalls on every run, so it could in principle keep the fast path
+    # by dropping the major from its key. That is left alone deliberately: the
+    # key already separated pnpm stores by Node version before this change, and
+    # removing that separation would rest on an unverified assumption about how
+    # pnpm keys build side effects inside its store.
+    - name: Setup Node.js for floating version spec
+      id: setup-node-floating
+      if: steps.resolve-cache-paths.outputs.nodeVersionIsFloating == 'true'
+      uses: actions/setup-node@v6
+      with:
+        node-version: ${{ inputs.node-version }}
+        package-manager-cache: false
 
     - name: Resolve dependency cache paths
       id: resolve-dependency-cache-paths
@@ -151,6 +194,9 @@ runs:
         CONFIGURE_NODEJS_WORKING_DIRECTORY: ${{ inputs.working-directory }}
         CONFIGURE_NODEJS_CACHE_KEY_SUFFIX: ${{ inputs.cache-key-suffix }}
         CONFIGURE_NODEJS_PACKAGE_MANAGER: ${{ steps.resolve-package-manager.outputs.packageManager }}
+        CONFIGURE_NODEJS_NODE_VERSION: ${{ inputs.node-version }}
+        CONFIGURE_NODEJS_INSTALLED_NODE_VERSION: ${{ steps.setup-node-floating.outputs.node-version }}
+        CONFIGURE_NODEJS_SETUP_NODE_STARTED_AT: ${{ steps.resolve-package-manager.outputs.setupNodeStartedAt }}
       with:
         script: |
           const path = require('path');
@@ -162,6 +208,35 @@ runs:
           const {
             buildResult,
           } = await import(moduleUrl);
+          const nodeVersionModuleUrl = pathToFileURL(
+            path.join(process.env.GITHUB_ACTION_PATH, 'scripts', 'resolve-node-version.mjs'),
+          ).href;
+          const { buildResult: buildNodeVersionResult } = await import(
+            nodeVersionModuleUrl,
+          );
+
+          const installedNodeVersion =
+            process.env.CONFIGURE_NODEJS_INSTALLED_NODE_VERSION ?? '';
+          const nodeVersion = buildNodeVersionResult({
+            nodeVersion: process.env.CONFIGURE_NODEJS_NODE_VERSION,
+            installedNodeVersion,
+          });
+
+          if (nodeVersion.resolvedFrom === 'setup-node') {
+            const setupNodeStartedAt = Number.parseInt(
+              process.env.CONFIGURE_NODEJS_SETUP_NODE_STARTED_AT,
+              10,
+            );
+            core.setOutput(
+              'floatingSetupNodeDurationMs',
+              Number.isFinite(setupNodeStartedAt)
+                ? Date.now() - setupNodeStartedAt
+                : 0,
+            );
+            core.info(
+              `Node.js version "${nodeVersion.spec}" resolved to ${installedNodeVersion}; keying the dependency cache on major ${nodeVersion.nodeMajor}.`,
+            );
+          }
 
           const result = buildResult({
             cwd: process.env.GITHUB_WORKSPACE,
@@ -174,6 +249,8 @@ runs:
           core.setOutput('primaryCachePath', result.primaryCachePath);
           core.setOutput('absolutePrimaryCachePath', result.absolutePrimaryCachePath);
           core.setOutput('cacheKeyPrefix', result.cacheKeyPrefix);
+          core.setOutput('nodeMajor', nodeVersion.nodeMajor);
+          core.setOutput('nodeCacheKeySegment', nodeVersion.nodeCacheKeySegment);
           core.setOutput('cacheRestoreStartedAt', Date.now());
 
     - name: Restore dependencies from cache
@@ -181,7 +258,7 @@ runs:
       uses: actions/cache/restore@v5
       with:
         path: ${{ steps.resolve-dependency-cache-paths.outputs.cachePaths }}
-        key: ${{ steps.resolve-dependency-cache-paths.outputs.cacheKeyPrefix }}-${{ inputs.node-version }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.resolve-cache-paths.outputs.workingDirectoryKey }}-${{ steps.resolve-package-manager.outputs.managerCacheKey }}-${{ steps.resolve-package-manager.outputs.lockfileSha }}${{ steps.resolve-cache-paths.outputs.cacheKeySuffixSegment }}
+        key: ${{ steps.resolve-dependency-cache-paths.outputs.cacheKeyPrefix }}-${{ steps.resolve-dependency-cache-paths.outputs.nodeCacheKeySegment }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.resolve-cache-paths.outputs.workingDirectoryKey }}-${{ steps.resolve-package-manager.outputs.managerCacheKey }}-${{ steps.resolve-package-manager.outputs.lockfileSha }}${{ steps.resolve-cache-paths.outputs.cacheKeySuffixSegment }}
         lookup-only: ${{ inputs.lookup-only }}
 
     - name: Record cache restore timing
@@ -200,8 +277,9 @@ runs:
           core.setOutput('setupNodeStartedAt', now);
 
     - name: Setup Node.js
+      id: setup-node
       uses: actions/setup-node@v6
-      if: inputs.lookup-only != 'true' || steps.cache-dependencies.outputs.cache-hit != 'true'
+      if: steps.resolve-cache-paths.outputs.nodeVersionIsFloating != 'true' && (inputs.lookup-only != 'true' || steps.cache-dependencies.outputs.cache-hit != 'true')
       with:
         node-version: ${{ inputs.node-version }}
         package-manager-cache: false
@@ -218,9 +296,16 @@ runs:
         CONFIGURE_NODEJS_NEEDS_COREPACK: ${{ steps.resolve-package-manager.outputs.needsCorepack }}
         CONFIGURE_NODEJS_ABSOLUTE_PRIMARY_CACHE_PATH: ${{ steps.resolve-dependency-cache-paths.outputs.absolutePrimaryCachePath }}
         CONFIGURE_NODEJS_LOOKUP_ONLY: ${{ inputs.lookup-only }}
+        CONFIGURE_NODEJS_NODE_VERSION: ${{ inputs.node-version }}
+        CONFIGURE_NODEJS_NODE_CACHE_KEY_MAJOR: ${{ steps.resolve-dependency-cache-paths.outputs.nodeMajor }}
+        CONFIGURE_NODEJS_INSTALLED_NODE_VERSION: ${{ steps.setup-node.outputs.node-version }}
+        CONFIGURE_NODEJS_FLOATING_SETUP_NODE_DURATION_MS: ${{ steps.resolve-dependency-cache-paths.outputs.floatingSetupNodeDurationMs }}
+        CONFIGURE_NODEJS_CACHE_HIT: ${{ steps.cache-dependencies.outputs.cache-hit }}
       with:
         script: |
+          const fs = require('fs');
           const path = require('path');
+          const { pathToFileURL } = require('url');
           const cwd = process.env.CONFIGURE_NODEJS_ABSOLUTE_WORKING_DIRECTORY;
           const manager = process.env.CONFIGURE_NODEJS_PACKAGE_MANAGER;
           const version = process.env.CONFIGURE_NODEJS_PACKAGE_MANAGER_VERSION;
@@ -231,7 +316,66 @@ runs:
             10,
           );
 
-          core.setOutput('setupNodeDurationMs', Date.now() - setupStartedAt);
+          const floatingSetupNodeDurationMs = Number.parseInt(
+            process.env.CONFIGURE_NODEJS_FLOATING_SETUP_NODE_DURATION_MS,
+            10,
+          );
+          core.setOutput(
+            'setupNodeDurationMs',
+            Number.isFinite(floatingSetupNodeDurationMs) &&
+              floatingSetupNodeDurationMs > 0
+              ? floatingSetupNodeDurationMs
+              : Date.now() - setupStartedAt,
+          );
+
+          // Backstop: the cache was keyed on a major parsed out of the
+          // node-version string. If setup-node disagrees, the restored
+          // node_modules was built against a different NODE_MODULE_VERSION, so
+          // drop it and reinstall rather than hand a mismatched ABI to the job.
+          const nodeVersionModuleUrl = pathToFileURL(
+            path.join(process.env.GITHUB_ACTION_PATH, 'scripts', 'resolve-node-version.mjs'),
+          ).href;
+          const {
+            detectNodeMajorMismatch,
+            shouldDiscardRestoredDependencies,
+            shouldInstallDependencies,
+          } = await import(nodeVersionModuleUrl);
+          const cacheHit = process.env.CONFIGURE_NODEJS_CACHE_HIT === 'true';
+          const lookupOnly = process.env.CONFIGURE_NODEJS_LOOKUP_ONLY === 'true';
+          const mismatch = detectNodeMajorMismatch({
+            cacheKeyNodeMajor: process.env.CONFIGURE_NODEJS_NODE_CACHE_KEY_MAJOR,
+            installedNodeVersion:
+              process.env.CONFIGURE_NODEJS_INSTALLED_NODE_VERSION,
+          });
+          if (mismatch) {
+            core.warning(
+              `Node.js version "${process.env.CONFIGURE_NODEJS_NODE_VERSION}" was treated as pinned to major ${mismatch.cacheKeyNodeMajor}, but actions/setup-node installed major ${mismatch.installedMajor}. Discarding the restored dependencies and reinstalling so native addons match the running ABI. The cache entry cannot be corrected under a key that already exists, so every run will reinstall until the lockfile changes -- please report this version spec to pwrdrvr/configure-nodejs so the classifier can be fixed.`,
+            );
+          }
+          if (
+            shouldDiscardRestoredDependencies({
+              packageManager: manager,
+              cacheHit,
+              mismatch,
+            })
+          ) {
+            // For npm and Yarn the primary cache path is node_modules itself.
+            fs.rmSync(process.env.CONFIGURE_NODEJS_ABSOLUTE_PRIMARY_CACHE_PATH, {
+              recursive: true,
+              force: true,
+            });
+          }
+          core.setOutput(
+            'shouldInstall',
+            String(
+              shouldInstallDependencies({
+                packageManager: manager,
+                cacheHit,
+                lookupOnly,
+                mismatch,
+              }),
+            ),
+          );
 
           let activationDurationMs = 0;
           let storeDiscoveryDurationMs = 0;
@@ -307,7 +451,7 @@ runs:
 
     - name: Install dependencies
       id: install-dependencies
-      if: steps.cache-dependencies.outputs.cache-hit != 'true' || (steps.resolve-package-manager.outputs.packageManager == 'pnpm' && inputs.lookup-only != 'true')
+      if: steps.prepare-package-manager.outputs.shouldInstall == 'true'
       uses: actions/github-script@v8
       env:
         CONFIGURE_NODEJS_ABSOLUTE_WORKING_DIRECTORY: ${{ steps.resolve-cache-paths.outputs.absoluteWorkingDirectory }}
@@ -356,7 +500,7 @@ runs:
       uses: actions/cache/save@v5
       with:
         path: ${{ steps.resolve-dependency-cache-paths.outputs.cachePaths }}
-        key: ${{ steps.resolve-dependency-cache-paths.outputs.cacheKeyPrefix }}-${{ inputs.node-version }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.resolve-cache-paths.outputs.workingDirectoryKey }}-${{ steps.resolve-package-manager.outputs.managerCacheKey }}-${{ steps.resolve-package-manager.outputs.lockfileSha }}${{ steps.resolve-cache-paths.outputs.cacheKeySuffixSegment }}
+        key: ${{ steps.resolve-dependency-cache-paths.outputs.cacheKeyPrefix }}-${{ steps.resolve-dependency-cache-paths.outputs.nodeCacheKeySegment }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.resolve-cache-paths.outputs.workingDirectoryKey }}-${{ steps.resolve-package-manager.outputs.managerCacheKey }}-${{ steps.resolve-package-manager.outputs.lockfileSha }}${{ steps.resolve-cache-paths.outputs.cacheKeySuffixSegment }}
 
     - name: Report phase timings
       id: finalize-timings
@@ -366,6 +510,7 @@ runs:
         CONFIGURE_NODEJS_ACTION_STARTED_AT: ${{ steps.resolve-cache-paths.outputs.actionStartedAt }}
         CONFIGURE_NODEJS_CACHE_RESTORE_DURATION_MS: ${{ steps.cache-restore-timing.outputs.cacheRestoreDurationMs }}
         CONFIGURE_NODEJS_SETUP_NODE_DURATION_MS: ${{ steps.prepare-package-manager.outputs.setupNodeDurationMs }}
+        CONFIGURE_NODEJS_FLOATING_SETUP_NODE_DURATION_MS: ${{ steps.resolve-dependency-cache-paths.outputs.floatingSetupNodeDurationMs }}
         CONFIGURE_NODEJS_ACTIVATION_DURATION_MS: ${{ steps.prepare-package-manager.outputs.activationDurationMs }}
         CONFIGURE_NODEJS_STORE_DISCOVERY_DURATION_MS: ${{ steps.prepare-package-manager.outputs.storeDiscoveryDurationMs }}
         CONFIGURE_NODEJS_INSTALL_DURATION_MS: ${{ steps.install-dependencies.outputs.durationMs }}
@@ -388,9 +533,13 @@ runs:
             cacheRestoreDurationMs: numberOrZero(
               process.env.CONFIGURE_NODEJS_CACHE_RESTORE_DURATION_MS,
             ),
-            setupNodeDurationMs: numberOrZero(
-              process.env.CONFIGURE_NODEJS_SETUP_NODE_DURATION_MS,
-            ),
+            // A floating spec sets up Node before the cache restore, and that
+            // path skips the package-manager step entirely on a lookup-only hit.
+            setupNodeDurationMs:
+              numberOrZero(process.env.CONFIGURE_NODEJS_SETUP_NODE_DURATION_MS) ||
+              numberOrZero(
+                process.env.CONFIGURE_NODEJS_FLOATING_SETUP_NODE_DURATION_MS,
+              ),
             activationDurationMs: numberOrZero(
               process.env.CONFIGURE_NODEJS_ACTIVATION_DURATION_MS,
             ),

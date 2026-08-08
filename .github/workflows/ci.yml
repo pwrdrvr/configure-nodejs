@@ -36,6 +36,143 @@ jobs:
       - name: Run unit tests
         run: npm test
 
+  node-version-cache-keys:
+    name: Node version cache keys (ubuntu-latest)
+    needs: unit
+    runs-on: ubuntu-latest
+    env:
+      PINNED_SUFFIX: node-keys-pinned-${{ github.run_id }}-${{ github.run_attempt }}
+      FLOATING_SUFFIX: node-keys-floating-${{ github.run_id }}-${{ github.run_attempt }}
+      FIXTURE: fixtures/npm-basic
+    steps:
+      - uses: actions/checkout@v6
+
+      # A restored node_modules can contain native addons compiled against the
+      # NODE_MODULE_VERSION of the major that installed them, so the cache key
+      # has to separate majors and only majors.
+      - name: Prime the cache on Node 24
+        id: prime-24
+        uses: ./
+        with:
+          node-version: 24.14.1
+          working-directory: ${{ env.FIXTURE }}
+          cache-key-suffix: ${{ env.PINNED_SUFFIX }}
+
+      - name: Remove materialized dependencies
+        run: rm -rf "${FIXTURE}/node_modules"
+
+      - name: Restore on a different patch of the same major
+        id: restore-24x
+        uses: ./
+        with:
+          node-version: 24.x
+          working-directory: ${{ env.FIXTURE }}
+          cache-key-suffix: ${{ env.PINNED_SUFFIX }}
+
+      # The tree was installed under 24.14.1 and restored under 24.x. Actually
+      # importing it is what proves the shared entry is usable, not just present.
+      - name: Validate the dependency restored across patch versions
+        working-directory: ${{ env.FIXTURE }}
+        run: node check.mjs
+
+      - name: Remove materialized dependencies
+        run: rm -rf "${FIXTURE}/node_modules"
+
+      - name: Miss on a different major
+        id: miss-22x
+        uses: ./
+        with:
+          node-version: 22.x
+          working-directory: ${{ env.FIXTURE }}
+          cache-key-suffix: ${{ env.PINNED_SUFFIX }}
+
+      - name: Validate pinned-spec cache separation
+        uses: actions/github-script@v8
+        env:
+          PRIME_24_HIT: ${{ steps.prime-24.outputs.cache-hit }}
+          PRIME_24_MAJOR: ${{ steps.prime-24.outputs.node-major }}
+          RESTORE_24X_HIT: ${{ steps.restore-24x.outputs.cache-hit }}
+          RESTORE_24X_MAJOR: ${{ steps.restore-24x.outputs.node-major }}
+          MISS_22X_HIT: ${{ steps.miss-22x.outputs.cache-hit }}
+          MISS_22X_MAJOR: ${{ steps.miss-22x.outputs.node-major }}
+        with:
+          script: |
+            const assert = require('assert/strict');
+            assert.notEqual(process.env.PRIME_24_HIT, 'true');
+            assert.equal(process.env.PRIME_24_MAJOR, '24');
+            assert.equal(
+              process.env.RESTORE_24X_HIT,
+              'true',
+              '24.x and 24.14.1 share an ABI and must share a cache entry',
+            );
+            assert.equal(process.env.RESTORE_24X_MAJOR, '24');
+            assert.notEqual(
+              process.env.MISS_22X_HIT,
+              'true',
+              '22.x must not restore a tree installed under Node 24',
+            );
+            assert.equal(process.env.MISS_22X_MAJOR, '22');
+
+      - name: Remove materialized dependencies
+        run: rm -rf "${FIXTURE}/node_modules"
+
+      # lts/* cannot be classified from the string, so the action resolves it
+      # with setup-node before computing the key.
+      - name: Prime the cache on a floating spec
+        id: prime-floating
+        uses: ./
+        with:
+          node-version: lts/*
+          working-directory: ${{ env.FIXTURE }}
+          cache-key-suffix: ${{ env.FLOATING_SUFFIX }}
+
+      - name: Validate the floating spec resolved to the installed major
+        env:
+          NODE_MAJOR: ${{ steps.prime-floating.outputs.node-major }}
+          CACHE_HIT: ${{ steps.prime-floating.outputs.cache-hit }}
+          SETUP_NODE_DURATION_MS: ${{ steps.prime-floating.outputs.setup-node-duration-ms }}
+        run: |
+          node --input-type=module -e '
+            import assert from "node:assert/strict";
+            assert.notEqual(process.env.CACHE_HIT, "true");
+            assert.equal(
+              process.versions.node.split(".")[0],
+              process.env.NODE_MAJOR,
+              "the cache key major must match the Node.js actions/setup-node put on PATH",
+            );
+            assert.ok(
+              Number.parseInt(process.env.SETUP_NODE_DURATION_MS, 10) > 0,
+              "the pre-restore setup-node phase must still be timed",
+            );
+          '
+
+      - name: Remove materialized dependencies
+        run: rm -rf "${FIXTURE}/node_modules"
+
+      - name: Restore the floating spec
+        id: restore-floating
+        uses: ./
+        with:
+          node-version: lts/*
+          working-directory: ${{ env.FIXTURE }}
+          cache-key-suffix: ${{ env.FLOATING_SUFFIX }}
+
+      - name: Validate the floating restore
+        uses: actions/github-script@v8
+        env:
+          CACHE_HIT: ${{ steps.restore-floating.outputs.cache-hit }}
+          NODE_MAJOR: ${{ steps.restore-floating.outputs.node-major }}
+          PRIMED_NODE_MAJOR: ${{ steps.prime-floating.outputs.node-major }}
+        with:
+          script: |
+            const assert = require('assert/strict');
+            assert.equal(process.env.CACHE_HIT, 'true');
+            assert.equal(process.env.NODE_MAJOR, process.env.PRIMED_NODE_MAJOR);
+
+      - name: Validate restored dependency
+        working-directory: ${{ env.FIXTURE }}
+        run: node check.mjs
+
   fixture:
     name: Fixture (${{ matrix.os }}, ${{ matrix.package-manager }})
     needs: unit
