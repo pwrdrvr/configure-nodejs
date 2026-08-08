@@ -67,7 +67,7 @@ steps:
 
 | Input | Default | Description |
 | --- | --- | --- |
-| `node-version` | `22.x` | Node.js version to install with `actions/setup-node` |
+| `node-version` | `22.x` | Node.js version to install with `actions/setup-node`. A spec that can cross a major release (`lts/*`, `latest`, `>=20`) has to be resolved by `actions/setup-node` before the cache key can be computed, so those specs install Node.js even when `lookup-only` hits |
 | `package-manager` | `""` | Optional override for `npm`, `pnpm`, or `yarn`; by default the action follows the package manager inferred from `package.json` and the lockfile present |
 | `working-directory` | `"."` | Repository-relative directory containing `package.json` and the lockfile |
 | `cache-key-suffix` | `""` | Optional suffix appended to the dependency cache key when you want to namespace cache entries |
@@ -87,6 +87,7 @@ steps:
 | `working-directory` | Normalized working directory |
 | `working-directory-key` | Cache-key-safe working-directory identifier |
 | `cache-hit` | `true` when the dependency cache entry exists for the computed key |
+| `node-major` | Node.js major version the dependency cache key was built from |
 | `pnpm-store-path` | Absolute workspace-local pnpm store path when pnpm setup runs |
 | `cache-restore-duration-ms` | Measured cache restore phase duration in milliseconds |
 | `setup-node-duration-ms` | Measured `actions/setup-node` phase duration in milliseconds |
@@ -110,7 +111,7 @@ The action fails fast when it finds multiple supported lockfiles in the same wor
 
 The cache key includes:
 
-- `node-version`
+- Node.js **major** version, because `NODE_MODULE_VERSION` — the ABI every compiled native addon in `node_modules` is built against — changes with each major and is stable within one. A pinned `node-version` supplies the major directly; a spec that can cross a major (`lts/*`, `latest`, `>=20`) is resolved by `actions/setup-node` first, which costs that spec the restore-before-setup fast path
 - runner OS and architecture
 - normalized working directory
 - resolved package manager and version
