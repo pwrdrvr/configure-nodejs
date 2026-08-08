@@ -8,7 +8,7 @@
 - restore a dependency cache
 - install dependencies when the selected package manager needs a materialized install
 
-The action is designed to be shared as `pwrdrvr/configure-nodejs@v1` and to work for both repository-root projects and subdirectory projects in monorepos.
+The action is designed to be shared as `pwrdrvr/configure-nodejs@v1`, runs natively on Linux, macOS, and Windows runners, and works for both repository-root projects and subdirectory projects in monorepos.
 
 ## Usage
 
@@ -31,6 +31,22 @@ steps:
     with:
       node-version: 22.x
       working-directory: apps/web
+```
+
+### Windows with a pinned pnpm version
+
+The same action contract works on GitHub-hosted Windows runners. Keep pnpm pinned in `package.json#packageManager`; the action activates that exact version with Corepack and verifies the workspace-local store before installing.
+
+```yaml
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pwrdrvr/configure-nodejs@<immutable-commit-sha>
+        with:
+          node-version: 24.14.1
+          working-directory: .
 ```
 
 ### Cache lookup without restore
@@ -71,6 +87,14 @@ steps:
 | `working-directory` | Normalized working directory |
 | `working-directory-key` | Cache-key-safe working-directory identifier |
 | `cache-hit` | `true` when the dependency cache entry exists for the computed key |
+| `pnpm-store-path` | Absolute workspace-local pnpm store path when pnpm setup runs |
+| `cache-restore-duration-ms` | Measured cache restore phase duration in milliseconds |
+| `setup-node-duration-ms` | Measured `actions/setup-node` phase duration in milliseconds |
+| `package-manager-activation-duration-ms` | Measured Corepack/package-manager activation duration in milliseconds |
+| `store-discovery-duration-ms` | Measured pnpm store discovery duration in milliseconds |
+| `install-duration-ms` | Measured dependency installation duration in milliseconds |
+| `cache-save-duration-ms` | Measured cache save phase duration in milliseconds |
+| `total-duration-ms` | Measured total action duration in milliseconds |
 
 ## Package-manager detection
 
@@ -98,6 +122,8 @@ For npm and Yarn, the action caches `node_modules` paths and skips installation 
 
 For pnpm, the action caches a workspace-local `.pnpm-store` path and runs `pnpm install --frozen-lockfile --store-dir .pnpm-store` in normal restore mode, even on a cache hit. The action also exports `npm_config_store_dir` for later workflow steps so follow-up pnpm commands use the same store. pnpm's `node_modules` layout is symlink-heavy and can fail when restored from a recursive `node_modules` archive; caching the store avoids that extraction problem while keeping installs fast.
 
+The package-manager and install commands are executed as structured argument arrays through the GitHub Actions runtime. This avoids POSIX shell assumptions on Windows and avoids interpolating repository metadata into a shell command. For pinned pnpm and Yarn projects, Corepack prepares the declared version and the action verifies the activated version before installation. Third-party package integrity remains enforced by the committed lockfile and the package manager's frozen/immutable install mode.
+
 For pnpm, `cache-hit` means the store cache was found. It does not mean `node_modules` was restored. In `lookup-only` mode, a pnpm cache hit still skips Node.js setup and dependency installation.
 
 When `lookup-only` is `true`, the action resolves the cache key before installing Node. On a cache hit it stops there; on a cache miss it still installs Node, enables Corepack when needed, and primes the cache.
@@ -114,9 +140,9 @@ Plug'n'Play-specific caching is intentionally out of scope for `v1`.
 
 ## Development
 
-Dogfood coverage for this action lives in [`pwrdrvr/configure-nodejs-test`](https://github.com/pwrdrvr/configure-nodejs-test).
+The repository CI runs helper unit tests and npm, pnpm, and Yarn fixture installs on GitHub-hosted Linux, macOS, and Windows runners. Each fixture primes a new cache, removes materialized dependencies, restores that cache, and validates the installed package. The action also reports phase timings in its outputs and the workflow job summary.
 
-That repository checks out `pwrdrvr/configure-nodejs` at a configurable ref, runs the unit tests for the helper scripts, and exercises npm, pnpm, and Yarn fixtures through the action entrypoint.
+Additional dogfood coverage lives in [`pwrdrvr/configure-nodejs-test`](https://github.com/pwrdrvr/configure-nodejs-test), which can validate a configurable published ref.
 
 ## Releases
 

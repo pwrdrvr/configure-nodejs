@@ -174,14 +174,27 @@ export function buildResult({ cwd, explicitManager }) {
     resolvedManager === packageJsonManager.manager ? packageJsonManager.version : '';
   const normalizedPackageManagerVersion = packageManagerVersion || 'unspecified';
 
-  let installCommand;
+  let installExecutable;
+  let installArguments;
   if (resolvedManager === 'npm') {
-    installCommand = 'npm ci';
+    installExecutable = 'npm';
+    installArguments = ['ci'];
   } else if (resolvedManager === 'pnpm') {
-    installCommand = 'pnpm install --frozen-lockfile --store-dir .pnpm-store';
+    installExecutable = 'pnpm';
+    installArguments = [
+      'install',
+      '--frozen-lockfile',
+      '--store-dir',
+      '.pnpm-store',
+    ];
   } else {
-    installCommand = getYarnInstallCommand(packageManagerVersion, cwd);
+    installExecutable = 'yarn';
+    installArguments = getYarnInstallCommand(packageManagerVersion, cwd)
+      .split(' ')
+      .slice(1);
   }
+
+  const installCommand = [installExecutable, ...installArguments].join(' ');
 
   return {
     packageManager: resolvedManager,
@@ -191,6 +204,8 @@ export function buildResult({ cwd, explicitManager }) {
     lockfilePath: path.relative(cwd, lockfile.lockfilePath),
     lockfileSha,
     installCommand,
+    installExecutable,
+    installArguments,
     needsCorepack: resolvedManager === 'npm' ? 'false' : 'true',
   };
 }
