@@ -133,7 +133,7 @@ jobs:
 On a hit the gate does not even install Node.js. It answers a question and exits. On a miss it pays the install once, writes the cache immediately — not in a post step, not conditionally — and every downstream job restores. Because the gate contains no build, lint, or tests, it has almost no failure surface, which is exactly what you want in the job responsible for writing your cache.
 
 > [!IMPORTANT]
-> **The gate and its consumers must agree on every input that feeds the cache key**: `node-version`, `working-directory`, `package-manager`, `cache-key-suffix`, and the runner OS and architecture. Mismatch it and the gate warms a key nobody reads: no error, no warning, just the naive behavior plus an extra job.
+> **The gate and its consumers must agree on every input that feeds the cache key**: `node-version`, `working-directory`, `package-manager`, `cache-electron`, `cache-key-suffix`, and the runner OS and architecture. Mismatch it and the gate warms a key nobody reads: no error, no warning, just the naive behavior plus an extra job.
 >
 > `node-version` contributes only its **major**, so a gate on `24.x` and a consumer on `24.14.1` do share a key — but a gate on `24.x` and a consumer on `22.x` do not, and neither matches one on `lts/*` in a year when `lts/*` is not 24.
 
@@ -229,11 +229,12 @@ By the time `Test` ran the cache was already written. If `Test` had failed, the 
 | `package-manager` | `""` | Optional override for `npm`, `pnpm`, or `yarn`; by default the action follows the package manager inferred from `package.json` and the lockfile present |
 | `working-directory` | `"."` | Repository-relative directory containing `package.json` and the lockfile |
 | `cache-key-suffix` | `""` | Optional suffix appended to the dependency cache key when you want to namespace cache entries |
+| `cache-electron` | `"false"` | When `true`, caches the workspace-local Electron runtime download cache and native-addon prebuild download cache, and points lifecycle scripts at them. See [Electron lifecycle download caches](#electron-lifecycle-download-caches) |
 | `lookup-only` | `"false"` | When `true`, only checks whether the cache exists and skips downloading it; on a cache hit the action also skips `setup-node` and install-time package-manager setup. See [the gate job pattern](#the-fix-a-gate-job-that-only-primes-the-cache) |
 
 ### Caching behavior
 
-The cache key is built from the Node.js **major**, runner OS and architecture, normalized working directory, resolved package manager and version, the lockfile SHA, and `cache-key-suffix`.
+The cache key is built from the Node.js **major**, runner OS and architecture, normalized working directory, resolved package manager and version, the lockfile SHA, the enabled Electron cache schema, and `cache-key-suffix`.
 
 The major is what matters because `NODE_MODULE_VERSION` — the ABI every compiled native addon in `node_modules` is built against — changes with each Node.js major and is stable within one. For npm and Yarn the action skips installation entirely on a hit, so a tree built under one major must never be restored under another. A pinned `node-version` supplies the major from the string alone and keeps the restore-before-`setup-node` fast path; a spec that can cross a major has to be resolved by `actions/setup-node` first, which is why those specs install Node.js even on a `lookup-only` hit.
 
@@ -244,6 +245,49 @@ The major is what matters because `NODE_MODULE_VERSION` — the ABI every compil
 | pnpm | workspace-local `.pnpm-store` | `pnpm install --frozen-lockfile --store-dir .pnpm-store` re-runs against the warm store |
 
 For pnpm, `cache-hit` means *the store cache was found*. It does not mean `node_modules` was restored. Cache paths and keys are scoped to `working-directory`, so subdirectory apps in a monorepo stay isolated. The action exports `npm_config_store_dir` for later workflow steps so follow-up pnpm commands use the same store.
+
+### Electron lifecycle download caches
+
+Electron applications often download more than package tarballs during install. `@electron/get` downloads the Electron runtime, while native modules using `prebuild-install` download binaries compiled for Electron's ABI. A warm pnpm store does not contain either download, so postinstall can still make a network request—and still fail—even when pnpm reports zero packages downloaded.
+
+Set `cache-electron: "true"` to include both download roots in the same immutable dependency cache:
+
+| Lifecycle consumer | Environment variable | Workspace-local root |
+| --- | --- | --- |
+| `@electron/get` | `electron_config_cache` | `<working-directory>/.cache/configure-nodejs/electron` |
+| `prebuild-install` (including its `_prebuilds` directory) | `npm_config_cache` | `<working-directory>/.cache/configure-nodejs/npm` |
+
+The action creates these directories and exports both variables before dependency installation, so package-manager lifecycle scripts write to the paths that will be saved. It validates real paths before restore and again before save; a working-directory or cache-path symlink that escapes the checked-out workspace fails instead of archiving unrelated self-hosted-runner files.
+
+This is opt-in because it expands each dependency cache and changes install environment for Electron projects. Enabling it adds the explicit schema segment `electron-true-v1` to the cache key. Leaving it disabled keeps the previous cache paths and key exactly, while changing the schema in a future action version will force a cold cache rather than restore an entry with incomplete artifacts.
+
+A PwrAgent-like gate and consumer must both opt in:
+
+```yaml
+jobs:
+  install-deps:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pwrdrvr/configure-nodejs@v1
+        with:
+          node-version: 24.x
+          cache-electron: "true"
+          lookup-only: "true"
+
+  test:
+    needs: install-deps
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pwrdrvr/configure-nodejs@v1
+        with:
+          node-version: 24.x
+          cache-electron: "true"
+      - run: pnpm test
+```
+
+On the first opt-in miss, the `lookup-only` gate still sets up Node.js, installs dependencies, populates both lifecycle caches, and saves them with the package-manager cache. On a hit, the gate only performs the lookup. Its downstream jobs restore all three cache components before postinstall runs. Repeat the opt-in on every OS/architecture-specific gate and consumer that should share this behavior.
 
 <details>
 <summary><b>All 19 outputs</b> — <code>package-manager</code>, <code>lockfile-sha</code>, <code>cache-hit</code>, <code>node-major</code>, <code>pnpm-store-path</code>, <code>install-command</code>, and per-phase timings in milliseconds.</summary>

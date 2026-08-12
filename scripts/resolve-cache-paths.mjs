@@ -3,11 +3,14 @@ import fs from 'fs';
 import path from 'path';
 import { pathToFileURL } from 'url';
 
+export const ELECTRON_CACHE_SCHEMA_VERSION = 'v1';
+
 export function parseArgs(argv) {
   const args = {
     cwd: process.cwd(),
     workingDirectory: '.',
     cacheKeySuffix: '',
+    cacheElectron: 'false',
     packageManager: '',
     githubOutput: process.env.GITHUB_OUTPUT ?? '',
   };
@@ -23,6 +26,9 @@ export function parseArgs(argv) {
       index += 1;
     } else if (arg === '--cache-key-suffix') {
       args.cacheKeySuffix = argv[index + 1] ?? '';
+      index += 1;
+    } else if (arg === '--cache-electron') {
+      args.cacheElectron = argv[index + 1] ?? '';
       index += 1;
     } else if (arg === '--package-manager') {
       args.packageManager = argv[index + 1] ?? '';
@@ -93,6 +99,22 @@ export function normalizeCacheKeySuffix(cacheKeySuffix) {
   return normalized.replace(/[^A-Za-z0-9_.-]+/g, '-');
 }
 
+export function normalizeCacheElectron(cacheElectron = 'false') {
+  const normalized = String(cacheElectron).trim().toLowerCase();
+
+  if (normalized === 'true') {
+    return true;
+  }
+
+  if (normalized === 'false') {
+    return false;
+  }
+
+  throw new Error(
+    `Invalid cache-electron value "${cacheElectron}". Expected "true" or "false".`,
+  );
+}
+
 export function normalizePackageManager(packageManager) {
   const normalized = packageManager.trim().toLowerCase();
   if (normalized === '') {
@@ -108,11 +130,102 @@ export function normalizePackageManager(packageManager) {
   return normalized;
 }
 
-export function buildCachePaths(workingDirectory, packageManager = '') {
+export function buildElectronCachePaths(workingDirectory) {
+  const base = workingDirectory === '.' ? '' : `${workingDirectory}/`;
+
+  return [
+    `${base}.cache/configure-nodejs/npm`,
+    `${base}.cache/configure-nodejs/electron`,
+  ];
+}
+
+function isPathWithin(boundaryPath, candidatePath, allowEqual = true) {
+  const relativePath = path.relative(boundaryPath, candidatePath);
+  return (
+    (allowEqual || relativePath !== '') &&
+    relativePath !== '..' &&
+    !relativePath.startsWith(`..${path.sep}`) &&
+    !path.isAbsolute(relativePath)
+  );
+}
+
+function findNearestExistingPath(candidatePath) {
+  let currentPath = candidatePath;
+
+  while (true) {
+    try {
+      fs.lstatSync(currentPath);
+      return currentPath;
+    } catch (error) {
+      if (error.code !== 'ENOENT' && error.code !== 'ENOTDIR') {
+        throw error;
+      }
+    }
+
+    const parentPath = path.dirname(currentPath);
+    if (parentPath === currentPath) {
+      throw new Error(`Could not find an existing parent for "${candidatePath}".`);
+    }
+    currentPath = parentPath;
+  }
+}
+
+export function assertPathWithinDirectory({
+  boundaryPath,
+  candidatePath,
+  description,
+  allowEqual = false,
+}) {
+  const absoluteBoundaryPath = path.resolve(boundaryPath);
+  const absoluteCandidatePath = path.resolve(candidatePath);
+
+  if (!isPathWithin(absoluteBoundaryPath, absoluteCandidatePath, allowEqual)) {
+    throw new Error(
+      `${description} "${candidatePath}" resolves outside "${boundaryPath}".`,
+    );
+  }
+
+  const realBoundaryPath = fs.realpathSync(absoluteBoundaryPath);
+  const existingCandidatePath = findNearestExistingPath(absoluteCandidatePath);
+  const realExistingCandidatePath = fs.realpathSync(existingCandidatePath);
+
+  if (!isPathWithin(realBoundaryPath, realExistingCandidatePath, true)) {
+    throw new Error(
+      `${description} "${candidatePath}" escapes "${boundaryPath}" through a symbolic link.`,
+    );
+  }
+}
+
+export function assertElectronCachePathsSafe({
+  cwd,
+  absoluteWorkingDirectory,
+  absoluteElectronCachePaths,
+}) {
+  assertPathWithinDirectory({
+    boundaryPath: cwd,
+    candidatePath: absoluteWorkingDirectory,
+    description: 'Working directory',
+    allowEqual: true,
+  });
+
+  for (const absoluteCachePath of absoluteElectronCachePaths) {
+    assertPathWithinDirectory({
+      boundaryPath: absoluteWorkingDirectory,
+      candidatePath: absoluteCachePath,
+      description: 'Electron cache path',
+    });
+  }
+}
+
+export function buildCachePaths(
+  workingDirectory,
+  packageManager = '',
+  electronCachePaths = [],
+) {
   const base = workingDirectory === '.' ? '' : `${workingDirectory}/`;
 
   if (packageManager === 'pnpm') {
-    return [`${base}.pnpm-store`];
+    return [`${base}.pnpm-store`, ...electronCachePaths];
   }
 
   return [
@@ -120,6 +233,7 @@ export function buildCachePaths(workingDirectory, packageManager = '') {
     `${base}**/node_modules`,
     `!${base}node_modules/.cache`,
     `!${base}**/node_modules/.cache`,
+    ...electronCachePaths,
   ];
 }
 
@@ -136,11 +250,40 @@ export function buildResult({
   cwd,
   workingDirectory,
   cacheKeySuffix = '',
+  cacheElectron = 'false',
   packageManager = '',
 }) {
   const resolvedWorkingDirectory = resolveWorkingDirectory(cwd, workingDirectory);
   const normalizedCacheKeySuffix = normalizeCacheKeySuffix(cacheKeySuffix);
+  const normalizedCacheElectron = normalizeCacheElectron(cacheElectron);
   const normalizedPackageManager = normalizePackageManager(packageManager);
+  const electronCachePaths = normalizedCacheElectron
+    ? buildElectronCachePaths(resolvedWorkingDirectory.workingDirectory)
+    : [];
+  const absoluteElectronCachePaths = normalizedCacheElectron
+    ? [
+        path.resolve(
+          resolvedWorkingDirectory.absoluteWorkingDirectory,
+          '.cache',
+          'configure-nodejs',
+          'npm',
+        ),
+        path.resolve(
+          resolvedWorkingDirectory.absoluteWorkingDirectory,
+          '.cache',
+          'configure-nodejs',
+          'electron',
+        ),
+      ]
+    : [];
+
+  if (normalizedCacheElectron) {
+    assertElectronCachePathsSafe({
+      cwd,
+      absoluteWorkingDirectory: resolvedWorkingDirectory.absoluteWorkingDirectory,
+      absoluteElectronCachePaths,
+    });
+  }
 
   const primaryCachePath = buildPrimaryCachePath(
     resolvedWorkingDirectory.workingDirectory,
@@ -156,7 +299,15 @@ export function buildResult({
     cachePaths: buildCachePaths(
       resolvedWorkingDirectory.workingDirectory,
       normalizedPackageManager,
+      electronCachePaths,
     ),
+    cacheElectron: normalizedCacheElectron,
+    electronCachePaths,
+    absolutePrebuildCachePath: absoluteElectronCachePaths[0] ?? '',
+    absoluteElectronCachePath: absoluteElectronCachePaths[1] ?? '',
+    electronCacheKeySegment: normalizedCacheElectron
+      ? `-electron-true-${ELECTRON_CACHE_SCHEMA_VERSION}`
+      : '',
     primaryCachePath,
     absolutePrimaryCachePath: path.resolve(cwd, primaryCachePath),
     cacheKeyPrefix: buildCacheKeyPrefix(normalizedPackageManager),
@@ -190,6 +341,7 @@ export function main(argv = process.argv.slice(2)) {
     cwd: args.cwd,
     workingDirectory: args.workingDirectory,
     cacheKeySuffix: args.cacheKeySuffix,
+    cacheElectron: args.cacheElectron,
     packageManager: args.packageManager,
   });
 
