@@ -244,6 +244,20 @@ test('enabled Electron caching exports both lifecycle download cache variables',
   );
 });
 
+test('a pnpm lookup-only miss exports the local store for the install step', () => {
+  const prepareScript = stepBlock('prepare-package-manager').lines.join('\n');
+
+  assert.match(
+    prepareScript,
+    /if \(manager === 'pnpm'\) \{[\s\S]*core\.exportVariable\('npm_config_store_dir', expectedStorePath\)/,
+  );
+  assert.doesNotMatch(
+    prepareScript,
+    /CONFIGURE_NODEJS_LOOKUP_ONLY !== 'true'[\s\S]*core\.exportVariable\('npm_config_store_dir'/,
+    'the prepare step only runs for normal consumers or lookup-only misses, so both paths must export the store',
+  );
+});
+
 test('installation is gated on the resolved shouldInstall decision', () => {
   // The three reasons an install can be required live in
   // shouldInstallDependencies, where they are unit tested. The step condition

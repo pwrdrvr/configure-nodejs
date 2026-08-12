@@ -2,9 +2,6 @@
   "name": "npm-basic-fixture",
   "private": true,
   "type": "module",
-  "scripts": {
-    "postinstall": "node write-electron-cache-markers.mjs"
-  },
   "dependencies": {
     "picocolors": "1.1.1"
   }

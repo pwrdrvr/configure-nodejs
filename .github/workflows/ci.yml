@@ -185,7 +185,7 @@ jobs:
           - macos-latest
           - windows-latest
     env:
-      FIXTURE: fixtures/npm-basic
+      FIXTURE: fixtures/pnpm-basic
       CACHE_SUFFIX: electron-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
@@ -206,6 +206,10 @@ jobs:
             const path = require('path');
             fs.rmSync(
               path.join(process.env.GITHUB_WORKSPACE, process.env.FIXTURE, 'node_modules'),
+              { recursive: true, force: true },
+            );
+            fs.rmSync(
+              path.join(process.env.GITHUB_WORKSPACE, process.env.FIXTURE, '.pnpm-store'),
               { recursive: true, force: true },
             );
 
@@ -263,6 +267,10 @@ jobs:
               force: true,
             });
             fs.rmSync(path.join(fixture, '.cache'), {
+              recursive: true,
+              force: true,
+            });
+            fs.rmSync(path.join(fixture, '.pnpm-store'), {
               recursive: true,
               force: true,
             });

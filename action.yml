@@ -439,9 +439,7 @@ runs:
           if (manager === 'pnpm') {
             const storeDiscoveryStartedAt = Date.now();
             process.env.npm_config_store_dir = expectedStorePath;
-            if (process.env.CONFIGURE_NODEJS_LOOKUP_ONLY !== 'true') {
-              core.exportVariable('npm_config_store_dir', expectedStorePath);
-            }
+            core.exportVariable('npm_config_store_dir', expectedStorePath);
 
             const storeResult = await exec.getExecOutput(
               'pnpm',
