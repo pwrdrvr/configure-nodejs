@@ -143,10 +143,12 @@ test('the dependency cache key is built from the resolved Node.js major', () => 
 });
 
 test('Electron caching is opt-in and schema-keyed without changing the default key', () => {
-  const inputsBlock = actionYaml.slice(
-    actionYaml.indexOf('\ninputs:'),
-    actionYaml.indexOf('\noutputs:'),
-  );
+  const inputsBlock = linesOf(
+    actionYaml.slice(
+      actionYaml.indexOf('\ninputs:'),
+      actionYaml.indexOf('\noutputs:'),
+    ),
+  ).join('\n');
   const [key] = cacheKeyLines();
 
   assert.match(
