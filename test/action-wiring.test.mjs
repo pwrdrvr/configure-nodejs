@@ -142,6 +142,30 @@ test('the dependency cache key is built from the resolved Node.js major', () => 
   );
 });
 
+test('Electron caching is opt-in and schema-keyed without changing the default key', () => {
+  const inputsBlock = linesOf(
+    actionYaml.slice(
+      actionYaml.indexOf('\ninputs:'),
+      actionYaml.indexOf('\noutputs:'),
+    ),
+  ).join('\n');
+  const [key] = cacheKeyLines();
+
+  assert.match(
+    inputsBlock,
+    /  cache-electron:\n    description: .*\n    default: "false"/,
+  );
+  assert.match(
+    key,
+    /\$\{\{ steps\.resolve-dependency-cache-paths\.outputs\.electronCacheKeySegment \}\}/,
+  );
+  assert.match(
+    key,
+    /lockfileSha \}\}\$\{\{ steps\.resolve-dependency-cache-paths\.outputs\.electronCacheKeySegment \}\}\$\{\{ steps\.resolve-cache-paths\.outputs\.cacheKeySuffixSegment \}\}$/,
+    'the optional Electron segment must be empty when disabled and precede the existing suffix when enabled',
+  );
+});
+
 test('exactly one of the two setup-node steps runs, chosen by the version spec', () => {
   assert.equal(
     stepValue('setup-node-floating', 'if'),
@@ -192,6 +216,45 @@ test('the pinned fast path still lets lookup-only skip Node installation on a hi
   assert.match(
     stepValue('setup-node', 'if'),
     /\(inputs\.lookup-only != 'true' \|\| steps\.cache-dependencies\.outputs\.cache-hit != 'true'\)/,
+  );
+});
+
+test('lookup-only still prepares and installs on a miss but skips setup on a hit', () => {
+  assert.equal(
+    stepValue('prepare-package-manager', 'if'),
+    "inputs.lookup-only != 'true' || steps.cache-dependencies.outputs.cache-hit != 'true'",
+  );
+  assert.equal(
+    stepValue('install-dependencies', 'if'),
+    "steps.prepare-package-manager.outputs.shouldInstall == 'true'",
+  );
+});
+
+test('enabled Electron caching exports both lifecycle download cache variables', () => {
+  const prepareScript = inlineScripts().find((block) => {
+    const step = stepBlock('prepare-package-manager');
+    return block.line >= step.first && block.line < step.last;
+  });
+
+  assert.ok(prepareScript, 'failed to find the prepare-package-manager script');
+  assert.match(prepareScript.body, /core\.exportVariable\('npm_config_cache'/);
+  assert.match(
+    prepareScript.body,
+    /core\.exportVariable\('electron_config_cache'/,
+  );
+});
+
+test('a pnpm lookup-only miss exports the local store for the install step', () => {
+  const prepareScript = stepBlock('prepare-package-manager').lines.join('\n');
+
+  assert.match(
+    prepareScript,
+    /if \(manager === 'pnpm'\) \{[\s\S]*core\.exportVariable\('npm_config_store_dir', expectedStorePath\)/,
+  );
+  assert.doesNotMatch(
+    prepareScript,
+    /CONFIGURE_NODEJS_LOOKUP_ONLY !== 'true'[\s\S]*core\.exportVariable\('npm_config_store_dir'/,
+    'the prepare step only runs for normal consumers or lookup-only misses, so both paths must export the store',
   );
 });
 

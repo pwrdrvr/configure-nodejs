@@ -173,6 +173,158 @@ jobs:
         working-directory: ${{ env.FIXTURE }}
         run: node check.mjs
 
+  electron-cache:
+    name: Electron lifecycle cache (${{ matrix.os }})
+    needs: unit
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+    env:
+      FIXTURE: fixtures/pnpm-basic
+      CACHE_SUFFIX: electron-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Prime the default dependency cache
+        id: default-prime
+        uses: ./
+        with:
+          node-version: 24.14.1
+          working-directory: ${{ env.FIXTURE }}
+          cache-key-suffix: ${{ env.CACHE_SUFFIX }}
+
+      - name: Remove default-mode dependencies
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            fs.rmSync(
+              path.join(process.env.GITHUB_WORKSPACE, process.env.FIXTURE, 'node_modules'),
+              { recursive: true, force: true },
+            );
+            fs.rmSync(
+              path.join(process.env.GITHUB_WORKSPACE, process.env.FIXTURE, '.pnpm-store'),
+              { recursive: true, force: true },
+            );
+
+      - name: Prime the Electron cache through lookup-only
+        id: electron-prime
+        uses: ./
+        with:
+          node-version: 24.14.1
+          working-directory: ${{ env.FIXTURE }}
+          cache-electron: "true"
+          cache-key-suffix: ${{ env.CACHE_SUFFIX }}
+          lookup-only: "true"
+
+      - name: Validate key separation and lifecycle writes
+        uses: actions/github-script@v8
+        env:
+          DEFAULT_HIT: ${{ steps.default-prime.outputs.cache-hit }}
+          ELECTRON_HIT: ${{ steps.electron-prime.outputs.cache-hit }}
+        with:
+          script: |
+            const assert = require('assert/strict');
+            const fs = require('fs');
+            const path = require('path');
+            const fixture = path.join(process.env.GITHUB_WORKSPACE, process.env.FIXTURE);
+            assert.notEqual(process.env.DEFAULT_HIT, 'true');
+            assert.notEqual(
+              process.env.ELECTRON_HIT,
+              'true',
+              'cache-electron must not hit the default-mode immutable cache',
+            );
+            assert.equal(
+              process.env.npm_config_cache,
+              path.join(fixture, '.cache', 'configure-nodejs', 'npm'),
+            );
+            assert.equal(
+              process.env.electron_config_cache,
+              path.join(fixture, '.cache', 'configure-nodejs', 'electron'),
+            );
+            assert.ok(
+              fs.existsSync(path.join(process.env.npm_config_cache, '_prebuilds', 'native-abi.marker')),
+            );
+            assert.ok(
+              fs.existsSync(path.join(process.env.electron_config_cache, 'electron-runtime.marker')),
+            );
+
+      - name: Remove materialized cache content
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const fixture = path.join(process.env.GITHUB_WORKSPACE, process.env.FIXTURE);
+            fs.rmSync(path.join(fixture, 'node_modules'), {
+              recursive: true,
+              force: true,
+            });
+            fs.rmSync(path.join(fixture, '.cache'), {
+              recursive: true,
+              force: true,
+            });
+            fs.rmSync(path.join(fixture, '.pnpm-store'), {
+              recursive: true,
+              force: true,
+            });
+
+      - name: Probe the primed Electron cache without restoring
+        id: electron-probe
+        uses: ./
+        with:
+          node-version: 24.14.1
+          working-directory: ${{ env.FIXTURE }}
+          cache-electron: "true"
+          cache-key-suffix: ${{ env.CACHE_SUFFIX }}
+          lookup-only: "true"
+
+      - name: Validate lookup-only hit behavior
+        uses: actions/github-script@v8
+        env:
+          CACHE_HIT: ${{ steps.electron-probe.outputs.cache-hit }}
+        with:
+          script: |
+            const assert = require('assert/strict');
+            const fs = require('fs');
+            const path = require('path');
+            const fixture = path.join(process.env.GITHUB_WORKSPACE, process.env.FIXTURE);
+            assert.equal(process.env.CACHE_HIT, 'true');
+            assert.equal(fs.existsSync(path.join(fixture, 'node_modules')), false);
+            assert.equal(fs.existsSync(path.join(fixture, '.cache')), false);
+
+      - name: Restore the Electron cache as a consumer
+        id: electron-restore
+        uses: ./
+        with:
+          node-version: 24.14.1
+          working-directory: ${{ env.FIXTURE }}
+          cache-electron: "true"
+          cache-key-suffix: ${{ env.CACHE_SUFFIX }}
+
+      - name: Validate both lifecycle caches restored before install
+        uses: actions/github-script@v8
+        env:
+          CACHE_HIT: ${{ steps.electron-restore.outputs.cache-hit }}
+        with:
+          script: |
+            const assert = require('assert/strict');
+            const fs = require('fs');
+            const path = require('path');
+            assert.equal(process.env.CACHE_HIT, 'true');
+            assert.ok(
+              fs.existsSync(path.join(process.env.npm_config_cache, '_prebuilds', 'native-abi.marker')),
+            );
+            assert.ok(
+              fs.existsSync(path.join(process.env.electron_config_cache, 'electron-runtime.marker')),
+            );
+
   fixture:
     name: Fixture (${{ matrix.os }}, ${{ matrix.package-manager }})
     needs: unit

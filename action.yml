@@ -14,6 +14,9 @@ inputs:
   cache-key-suffix:
     description: "Optional suffix appended to the dependency cache key for namespacing"
     default: ""
+  cache-electron:
+    description: "If true, cache workspace-local Electron runtime and native-addon downloads used by lifecycle scripts"
+    default: "false"
   lookup-only:
     description: "If true, only checks if the dependency cache exists and skips download. Does not change save cache behavior"
     default: "false"
@@ -86,6 +89,7 @@ runs:
       env:
         CONFIGURE_NODEJS_WORKING_DIRECTORY: ${{ inputs.working-directory }}
         CONFIGURE_NODEJS_CACHE_KEY_SUFFIX: ${{ inputs.cache-key-suffix }}
+        CONFIGURE_NODEJS_CACHE_ELECTRON: ${{ inputs.cache-electron }}
         CONFIGURE_NODEJS_NODE_VERSION: ${{ inputs.node-version }}
       with:
         script: |
@@ -108,6 +112,7 @@ runs:
             cwd: process.env.GITHUB_WORKSPACE,
             workingDirectory: process.env.CONFIGURE_NODEJS_WORKING_DIRECTORY,
             cacheKeySuffix: process.env.CONFIGURE_NODEJS_CACHE_KEY_SUFFIX,
+            cacheElectron: process.env.CONFIGURE_NODEJS_CACHE_ELECTRON,
           });
 
           core.setOutput('absoluteWorkingDirectory', result.absoluteWorkingDirectory);
@@ -193,6 +198,7 @@ runs:
       env:
         CONFIGURE_NODEJS_WORKING_DIRECTORY: ${{ inputs.working-directory }}
         CONFIGURE_NODEJS_CACHE_KEY_SUFFIX: ${{ inputs.cache-key-suffix }}
+        CONFIGURE_NODEJS_CACHE_ELECTRON: ${{ inputs.cache-electron }}
         CONFIGURE_NODEJS_PACKAGE_MANAGER: ${{ steps.resolve-package-manager.outputs.packageManager }}
         CONFIGURE_NODEJS_NODE_VERSION: ${{ inputs.node-version }}
         CONFIGURE_NODEJS_INSTALLED_NODE_VERSION: ${{ steps.setup-node-floating.outputs.node-version }}
@@ -242,6 +248,7 @@ runs:
             cwd: process.env.GITHUB_WORKSPACE,
             workingDirectory: process.env.CONFIGURE_NODEJS_WORKING_DIRECTORY,
             cacheKeySuffix: process.env.CONFIGURE_NODEJS_CACHE_KEY_SUFFIX,
+            cacheElectron: process.env.CONFIGURE_NODEJS_CACHE_ELECTRON,
             packageManager: process.env.CONFIGURE_NODEJS_PACKAGE_MANAGER,
           });
 
@@ -249,6 +256,10 @@ runs:
           core.setOutput('primaryCachePath', result.primaryCachePath);
           core.setOutput('absolutePrimaryCachePath', result.absolutePrimaryCachePath);
           core.setOutput('cacheKeyPrefix', result.cacheKeyPrefix);
+          core.setOutput('cacheElectron', String(result.cacheElectron));
+          core.setOutput('electronCacheKeySegment', result.electronCacheKeySegment);
+          core.setOutput('absolutePrebuildCachePath', result.absolutePrebuildCachePath);
+          core.setOutput('absoluteElectronCachePath', result.absoluteElectronCachePath);
           core.setOutput('nodeMajor', nodeVersion.nodeMajor);
           core.setOutput('nodeCacheKeySegment', nodeVersion.nodeCacheKeySegment);
           core.setOutput('cacheRestoreStartedAt', Date.now());
@@ -258,7 +269,7 @@ runs:
       uses: actions/cache/restore@v5
       with:
         path: ${{ steps.resolve-dependency-cache-paths.outputs.cachePaths }}
-        key: ${{ steps.resolve-dependency-cache-paths.outputs.cacheKeyPrefix }}-${{ steps.resolve-dependency-cache-paths.outputs.nodeCacheKeySegment }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.resolve-cache-paths.outputs.workingDirectoryKey }}-${{ steps.resolve-package-manager.outputs.managerCacheKey }}-${{ steps.resolve-package-manager.outputs.lockfileSha }}${{ steps.resolve-cache-paths.outputs.cacheKeySuffixSegment }}
+        key: ${{ steps.resolve-dependency-cache-paths.outputs.cacheKeyPrefix }}-${{ steps.resolve-dependency-cache-paths.outputs.nodeCacheKeySegment }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.resolve-cache-paths.outputs.workingDirectoryKey }}-${{ steps.resolve-package-manager.outputs.managerCacheKey }}-${{ steps.resolve-package-manager.outputs.lockfileSha }}${{ steps.resolve-dependency-cache-paths.outputs.electronCacheKeySegment }}${{ steps.resolve-cache-paths.outputs.cacheKeySuffixSegment }}
         lookup-only: ${{ inputs.lookup-only }}
 
     - name: Record cache restore timing
@@ -301,6 +312,9 @@ runs:
         CONFIGURE_NODEJS_INSTALLED_NODE_VERSION: ${{ steps.setup-node.outputs.node-version }}
         CONFIGURE_NODEJS_FLOATING_SETUP_NODE_DURATION_MS: ${{ steps.resolve-dependency-cache-paths.outputs.floatingSetupNodeDurationMs }}
         CONFIGURE_NODEJS_CACHE_HIT: ${{ steps.cache-dependencies.outputs.cache-hit }}
+        CONFIGURE_NODEJS_CACHE_ELECTRON: ${{ steps.resolve-dependency-cache-paths.outputs.cacheElectron }}
+        CONFIGURE_NODEJS_ABSOLUTE_PREBUILD_CACHE_PATH: ${{ steps.resolve-dependency-cache-paths.outputs.absolutePrebuildCachePath }}
+        CONFIGURE_NODEJS_ABSOLUTE_ELECTRON_CACHE_PATH: ${{ steps.resolve-dependency-cache-paths.outputs.absoluteElectronCachePath }}
       with:
         script: |
           const fs = require('fs');
@@ -377,6 +391,20 @@ runs:
             ),
           );
 
+          if (process.env.CONFIGURE_NODEJS_CACHE_ELECTRON === 'true') {
+            const prebuildCachePath =
+              process.env.CONFIGURE_NODEJS_ABSOLUTE_PREBUILD_CACHE_PATH;
+            const electronCachePath =
+              process.env.CONFIGURE_NODEJS_ABSOLUTE_ELECTRON_CACHE_PATH;
+            fs.mkdirSync(prebuildCachePath, { recursive: true });
+            fs.mkdirSync(electronCachePath, { recursive: true });
+            core.exportVariable('npm_config_cache', prebuildCachePath);
+            core.exportVariable('electron_config_cache', electronCachePath);
+            core.info(
+              `Using workspace-local Electron caches at ${electronCachePath} and ${prebuildCachePath}.`,
+            );
+          }
+
           let activationDurationMs = 0;
           let storeDiscoveryDurationMs = 0;
           if (process.env.CONFIGURE_NODEJS_NEEDS_COREPACK === 'true') {
@@ -411,9 +439,7 @@ runs:
           if (manager === 'pnpm') {
             const storeDiscoveryStartedAt = Date.now();
             process.env.npm_config_store_dir = expectedStorePath;
-            if (process.env.CONFIGURE_NODEJS_LOOKUP_ONLY !== 'true') {
-              core.exportVariable('npm_config_store_dir', expectedStorePath);
-            }
+            core.exportVariable('npm_config_store_dir', expectedStorePath);
 
             const storeResult = await exec.getExecOutput(
               'pnpm',
@@ -475,6 +501,9 @@ runs:
         CONFIGURE_NODEJS_PACKAGE_MANAGER: ${{ steps.resolve-package-manager.outputs.packageManager }}
         CONFIGURE_NODEJS_ABSOLUTE_PRIMARY_CACHE_PATH: ${{ steps.resolve-dependency-cache-paths.outputs.absolutePrimaryCachePath }}
         CONFIGURE_NODEJS_ABSOLUTE_WORKING_DIRECTORY: ${{ steps.resolve-cache-paths.outputs.absoluteWorkingDirectory }}
+        CONFIGURE_NODEJS_CACHE_ELECTRON: ${{ steps.resolve-dependency-cache-paths.outputs.cacheElectron }}
+        CONFIGURE_NODEJS_ABSOLUTE_PREBUILD_CACHE_PATH: ${{ steps.resolve-dependency-cache-paths.outputs.absolutePrebuildCachePath }}
+        CONFIGURE_NODEJS_ABSOLUTE_ELECTRON_CACHE_PATH: ${{ steps.resolve-dependency-cache-paths.outputs.absoluteElectronCachePath }}
       with:
         script: |
           const path = require('path');
@@ -484,6 +513,23 @@ runs:
             path.join(process.env.GITHUB_ACTION_PATH, 'scripts', 'detect-cache-paths.mjs'),
           ).href;
           const { hasCacheableDependencyPath } = await import(moduleUrl);
+          if (process.env.CONFIGURE_NODEJS_CACHE_ELECTRON === 'true') {
+            const cachePathsModuleUrl = pathToFileURL(
+              path.join(process.env.GITHUB_ACTION_PATH, 'scripts', 'resolve-cache-paths.mjs'),
+            ).href;
+            const { assertElectronCachePathsSafe } = await import(
+              cachePathsModuleUrl
+            );
+            assertElectronCachePathsSafe({
+              cwd: process.env.GITHUB_WORKSPACE,
+              absoluteWorkingDirectory:
+                process.env.CONFIGURE_NODEJS_ABSOLUTE_WORKING_DIRECTORY,
+              absoluteElectronCachePaths: [
+                process.env.CONFIGURE_NODEJS_ABSOLUTE_PREBUILD_CACHE_PATH,
+                process.env.CONFIGURE_NODEJS_ABSOLUTE_ELECTRON_CACHE_PATH,
+              ],
+            });
+          }
           const exists = hasCacheableDependencyPath({
             packageManager: process.env.CONFIGURE_NODEJS_PACKAGE_MANAGER,
             absolutePrimaryCachePath:
@@ -500,7 +546,7 @@ runs:
       uses: actions/cache/save@v5
       with:
         path: ${{ steps.resolve-dependency-cache-paths.outputs.cachePaths }}
-        key: ${{ steps.resolve-dependency-cache-paths.outputs.cacheKeyPrefix }}-${{ steps.resolve-dependency-cache-paths.outputs.nodeCacheKeySegment }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.resolve-cache-paths.outputs.workingDirectoryKey }}-${{ steps.resolve-package-manager.outputs.managerCacheKey }}-${{ steps.resolve-package-manager.outputs.lockfileSha }}${{ steps.resolve-cache-paths.outputs.cacheKeySuffixSegment }}
+        key: ${{ steps.resolve-dependency-cache-paths.outputs.cacheKeyPrefix }}-${{ steps.resolve-dependency-cache-paths.outputs.nodeCacheKeySegment }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.resolve-cache-paths.outputs.workingDirectoryKey }}-${{ steps.resolve-package-manager.outputs.managerCacheKey }}-${{ steps.resolve-package-manager.outputs.lockfileSha }}${{ steps.resolve-dependency-cache-paths.outputs.electronCacheKeySegment }}${{ steps.resolve-cache-paths.outputs.cacheKeySuffixSegment }}
 
     - name: Report phase timings
       id: finalize-timings
