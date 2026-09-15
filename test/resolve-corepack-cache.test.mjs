@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import path from 'node:path';
 import { resolveCorepackCache } from '../scripts/resolve-corepack-cache.mjs';
 
 const base = { manager: 'pnpm', version: '10.33.0', runnerTemp: '/tmp/runner', os: 'Linux', arch: 'X64' };
@@ -12,7 +13,10 @@ test('Corepack identity separates versions, integrity hashes, managers and platf
     assert.notEqual(resolveCorepackCache({ ...base, ...change }).key, original.key);
   }
   assert.equal(resolveCorepackCache({ ...base, runnerTemp: '/another/runner' }).key, original.key);
-  assert.ok(original.home.startsWith('/tmp/runner/'));
+  assert.equal(
+    path.relative(base.runnerTemp, path.dirname(original.home)),
+    'configure-nodejs-corepack',
+  );
 });
 test('mutable selectors and npm do not enable Corepack caching', () => {
   for (const version of ['', 'latest', '10.x', '^10.0.0', 'https://example.com/pnpm.tgz']) {
