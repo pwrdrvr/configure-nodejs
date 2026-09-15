@@ -67,7 +67,7 @@ function stepValue(id, key, lines = actionLines) {
 
 function cacheKeyLines() {
   return actionLines
-    .filter((line) => /^\s*key: /.test(line))
+    .filter((line) => /^\s*key: /.test(line) && !line.includes('resolve-corepack-cache'))
     .map((line) => line.trim().slice('key: '.length));
 }
 
@@ -322,4 +322,21 @@ test('every inline github-script body parses', () => {
       `action.yml:${block.line} inline script does not parse`,
     );
   }
+});
+
+test('Corepack restores before activation and saves before dependency installation', () => {
+  const resolve = stepBlock('resolve-corepack-cache');
+  const restore = stepBlock('cache-corepack');
+  const prepare = stepBlock('prepare-package-manager');
+  const save = stepBlock('save-corepack');
+  assert.ok(resolve.first < restore.first && restore.first < prepare.first);
+  assert.ok(prepare.first < save.first && save.first < stepBlock('install-dependencies').first);
+  for (const block of [restore, save]) {
+    assert.match(block.lines.join('\n'), /key: \$\{\{ steps.resolve-corepack-cache.outputs.key \}\}/);
+    assert.match(block.lines.join('\n'), /path: \$\{\{ steps.resolve-corepack-cache.outputs.home \}\}/);
+  }
+  assert.match(stepValue('resolve-corepack-cache', 'if'), /needsCorepack == 'true'/);
+  assert.match(stepValue('resolve-corepack-cache', 'if'), /inputs.lookup-only != 'true' \|\| steps.cache-dependencies.outputs.cache-hit != 'true'/);
+  assert.match(stepValue('save-corepack', 'if'), /steps.cache-corepack.outputs.cache-hit != 'true'/);
+  assert.doesNotMatch(stepValue('save-corepack', 'if'), /always\(\)/);
 });

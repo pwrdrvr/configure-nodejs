@@ -246,6 +246,11 @@ The major is what matters because `NODE_MODULE_VERSION` — the ABI every compil
 
 For pnpm, `cache-hit` means *the store cache was found*. It does not mean `node_modules` was restored. Cache paths and keys are scoped to `working-directory`, so subdirectory apps in a monorepo stay isolated. The action exports `npm_config_store_dir` for later workflow steps so follow-up pnpm commands use the same store.
 
+Pinned pnpm and Yarn executables are cached separately in an action-managed `COREPACK_HOME` under the runner's temporary directory. This cache is keyed by OS, architecture, and the full package-manager version (including any integrity hash), independently of the lockfile, working directory, and dependency cache suffix. It restores before activation and saves immediately after successful preparation. Corepack still enables the shims and verifies the version on a cache hit, but can reuse the downloaded executable without fetching it again.
+
+Unpinned versions, ranges, and URL selectors do not use this separate cache. A `lookup-only` dependency cache hit skips Corepack setup and restore as before. The existing `cache-hit` output and cache restore/save timing outputs describe the dependency cache; Corepack cache transfer time is included only in the total duration.
+
+
 ### Electron lifecycle download caches
 
 Electron applications often download more than package tarballs during install. `@electron/get` downloads the Electron runtime, while native modules using `prebuild-install` download binaries compiled for Electron's ABI. A warm pnpm store does not contain either download, so postinstall can still make a network request—and still fail—even when pnpm reports zero packages downloaded.

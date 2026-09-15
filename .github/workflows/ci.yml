@@ -435,6 +435,18 @@ jobs:
               { recursive: true, force: true },
             );
 
+      - name: Remove Corepack download and require offline activation
+        if: matrix.package-manager != 'npm'
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const assert = require('assert/strict');
+            const fs = require('fs');
+            assert.ok(process.env.COREPACK_HOME, 'the action must export its Corepack cache path');
+            assert.ok(fs.existsSync(process.env.COREPACK_HOME));
+            fs.rmSync(process.env.COREPACK_HOME, { recursive: true, force: true });
+            core.exportVariable('COREPACK_ENABLE_NETWORK', '0');
+
       - name: Restore dependency cache
         id: restore
         uses: ./

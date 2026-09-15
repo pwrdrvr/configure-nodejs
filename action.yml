@@ -295,11 +295,50 @@ runs:
         node-version: ${{ inputs.node-version }}
         package-manager-cache: false
 
+    - name: Resolve Corepack cache
+      id: resolve-corepack-cache
+      if: steps.resolve-package-manager.outputs.needsCorepack == 'true' && (inputs.lookup-only != 'true' || steps.cache-dependencies.outputs.cache-hit != 'true')
+      uses: actions/github-script@v8
+      env:
+        CONFIGURE_NODEJS_PACKAGE_MANAGER: ${{ steps.resolve-package-manager.outputs.packageManager }}
+        CONFIGURE_NODEJS_PACKAGE_MANAGER_VERSION: ${{ steps.resolve-package-manager.outputs.packageManagerVersion }}
+        CONFIGURE_NODEJS_RUNNER_OS: ${{ runner.os }}
+        CONFIGURE_NODEJS_RUNNER_ARCH: ${{ runner.arch }}
+      with:
+        script: |
+          core.setOutput('startedAt', Date.now());
+          const path = require('path');
+          const { pathToFileURL } = require('url');
+          const { resolveCorepackCache } = await import(pathToFileURL(
+            path.join(process.env.GITHUB_ACTION_PATH, 'scripts', 'resolve-corepack-cache.mjs'),
+          ).href);
+          const result = resolveCorepackCache({
+            manager: process.env.CONFIGURE_NODEJS_PACKAGE_MANAGER,
+            version: process.env.CONFIGURE_NODEJS_PACKAGE_MANAGER_VERSION,
+            runnerTemp: process.env.RUNNER_TEMP,
+            os: process.env.CONFIGURE_NODEJS_RUNNER_OS,
+            arch: process.env.CONFIGURE_NODEJS_RUNNER_ARCH,
+          });
+          if (result) {
+            core.exportVariable('COREPACK_HOME', result.home);
+            core.setOutput('home', result.home);
+            core.setOutput('key', result.key);
+          }
+
+    - name: Restore Corepack package manager
+      id: cache-corepack
+      if: steps.resolve-corepack-cache.outputs.key != ''
+      uses: actions/cache/restore@v5
+      with:
+        path: ${{ steps.resolve-corepack-cache.outputs.home }}
+        key: ${{ steps.resolve-corepack-cache.outputs.key }}
+
     - name: Prepare package manager
       id: prepare-package-manager
       if: inputs.lookup-only != 'true' || steps.cache-dependencies.outputs.cache-hit != 'true'
       uses: actions/github-script@v8
       env:
+        CONFIGURE_NODEJS_COREPACK_CACHE_STARTED_AT: ${{ steps.resolve-corepack-cache.outputs.startedAt }}
         CONFIGURE_NODEJS_SETUP_STARTED_AT: ${{ steps.cache-restore-timing.outputs.setupNodeStartedAt }}
         CONFIGURE_NODEJS_ABSOLUTE_WORKING_DIRECTORY: ${{ steps.resolve-cache-paths.outputs.absoluteWorkingDirectory }}
         CONFIGURE_NODEJS_PACKAGE_MANAGER: ${{ steps.resolve-package-manager.outputs.packageManager }}
@@ -339,7 +378,7 @@ runs:
             Number.isFinite(floatingSetupNodeDurationMs) &&
               floatingSetupNodeDurationMs > 0
               ? floatingSetupNodeDurationMs
-              : Date.now() - setupStartedAt,
+              : (Number(process.env.CONFIGURE_NODEJS_COREPACK_CACHE_STARTED_AT) || Date.now()) - setupStartedAt,
           );
 
           // Backstop: the cache was keyed on a major parsed out of the
@@ -474,6 +513,15 @@ runs:
           }
           core.setOutput('activationDurationMs', activationDurationMs);
           core.setOutput('storeDiscoveryDurationMs', storeDiscoveryDurationMs);
+
+    # Save immediately so a later dependency install failure does not discard pnpm/Yarn.
+    - name: Save Corepack package manager
+      id: save-corepack
+      if: steps.resolve-corepack-cache.outputs.key != '' && steps.cache-corepack.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v5
+      with:
+        path: ${{ steps.resolve-corepack-cache.outputs.home }}
+        key: ${{ steps.resolve-corepack-cache.outputs.key }}
 
     - name: Install dependencies
       id: install-dependencies
