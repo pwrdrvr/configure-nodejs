@@ -250,31 +250,46 @@ README today: “pnpm's `node_modules` is a farm of symlinks into a content-addr
 
 ### Local experiment (tested, macOS ARM64, 2026-09-17)
 
-- Node 24.18.0, Corepack 0.35.0, pnpm **10.33.0**.
-- `npm_config_store_dir` + `--store-dir .pnpm-store`.
-- `pnpm store path --silent` → `…/.pnpm-store/v10`.
-- Import: **0** `node_modules` regular files shared inodes with the store; **0** with `nlink>1`. Matches pnpm `auto` on macOS (**clone**).
-- Layout: `node_modules/ms` → symlink `.pnpm/ms@2.1.3/node_modules/ms`; package files are regular files inside the virtual store.
-- BSD tar (`/usr/bin/tar`):
-  - `node_modules.tar` 44 KB; `store.tar` 1.3 MB.
-  - Restore `node_modules` only in a new directory: `node -e 'require("ms")(1000)'` → `1s` (**success**).
-  - Restore store only + `pnpm install --frozen-lockfile --offline --store-dir .pnpm-store`: `reused 1, downloaded 0` (**success**), then `require('ms')` works.
+Two runs: clone (`auto`) and forced hardlink. Node 24.18.0, Corepack 0.35.0, pnpm **10.33.0**, bsdtar 3.5.3. `@actions/cache` tar argv is `--posix -P -C --files-from` **without** `--hard-dereference` ([toolkit `tar.ts`](https://github.com/actions/toolkit/blob/main/packages/cache/src/internal/tar.ts)).
 
-So on this platform, **both** strategies work for a tiny no-native package.
+**Clone / `auto` (this action’s default on macOS):**
+
+- `npm_config_store_dir` + `--store-dir .pnpm-store` → `…/.pnpm-store/v10`.
+- **0** shared inodes with the store; **0** with `nlink>1`. APFS clone.
+- `node_modules/ms` → symlink `.pnpm/ms@2.1.3/node_modules/ms`.
+- Restore `node_modules` only in a new directory: `require('ms')` → `1s`.
+- Restore store only + `pnpm install --frozen-lockfile --offline`: `reused 1, downloaded 0`.
+
+**Hardlink (`--package-import-method=hardlink`, tiny `is-odd` graph):**
+
+- Package files: same inode as `store/v10/files/…`, `nlink=2`.
+- POSIX directory symlinks are **relative**.
+- `.modules.yaml` `storeDir` and `.bin` shim `NODE_PATH` are **absolute**.
+- GHA-like tar of `node_modules` **only**: **zero** type-1 hardlink members. GNU/BSD tar stores the first (only) occurrence of each inode as a regular file when the other name is outside the archive. Restore: Node `require` worked at the original path **and** a different path; files became `nlink=1` copies.
+- Store only + empty `node_modules` + `pnpm install --offline --frozen-lockfile`: success, `downloaded 0`, hardlinks recreated.
+- Restored `node_modules` + **empty** store + `pnpm install --offline`: `ERR_PNPM_NO_OFFLINE_TARBALL`. Offline install is a **store** operation.
+- Restored `node_modules` + mismatched absolute `storeDir`: pnpm wiped and recreated the tree.
+- Store **and** `node_modules` in one tar, **store listed first**: 60 type-1 members; extract restored `nlink=2`.
+
+So the folklore “you cannot cache pnpm `node_modules` because of hardlinks” is **false** for POSIX tar. Absolute `storeDir` / `NODE_PATH` and skipped lifecycle are the real hazards.
+
+Linux GHA (ext4) 10.x `auto` is clone-then-hardlink; 12.x docs are hardlink-first. Windows 10.33.0 `auto` **skips clone** and hardlinks (pnpm: Dev Drive reflinks are slower). Those OS were **not** tar-tested here. Windows junctions are **absolute** ([pnpm/symlink-dir#55](https://github.com/pnpm/symlink-dir/issues/55)); BSD `System32\tar.exe` has followed junctions into cycles ([actions/cache#315](https://github.com/actions/cache/issues/315)); toolkit prefers GNU tar on Windows for that reason.
 
 ### Why the action should still cache the store and reinstall
 
 | Reason | Evidence | Status |
 | --- | --- | --- |
 | Official CI guidance caches the store | pnpm.io CI, setup-node, action-setup | tested docs/source |
-| Linux `auto` hardlinks into the store | pnpm.io `packageImportMethod` table | tested docs; **not** locally reproduced on Linux here |
+| `pnpm install --offline` needs the store, not a restored `node_modules` | local: nm restore + empty store → `ERR_PNPM_NO_OFFLINE_TARBALL` | tested |
+| Linux/Windows `auto` hardlinks into the store | pnpm.io + 10.33.0 importer source; local hardlink run on macOS | docs + macOS hardlink tested; Linux/Windows tar **inferred** |
 | Skipping install skips postinstall | PwrGit: better-sqlite3 Electron native staging every consumer | tested logs |
 | Electron runtime / prebuild downloads are not in the store | README + `cache-electron`; PwrGit ran `cache-electron: false` | tested product + logs |
 | Virtual store is per-project; global virtual store is disabled in CI | pnpm.io | tested docs |
-| ABI / native addons | action keys Node **major** for this reason | tested source; pnpm reinstall still rebuilds as needed |
-| Windows junctions vs symlinks | toolkit sets `winsymlinks:nativestrict`; not the same as macOS clone | **inferred**; dogfood restores **store** not `node_modules` on Windows |
+| Absolute `storeDir` in `.modules.yaml` | local hardlink tree | tested |
+| ABI / native addons | action keys Node **major** | tested source |
+| Windows junctions vs relative POSIX symlinks | pnpm FAQ, cache#315 | **inferred** for GHA Windows nm restore |
 
-**Conclusion:** “cannot archive `node_modules`” is **too strong**. “Should not skip `pnpm install` after restore” is **right** for this action’s consumers. Caching store + `node_modules` together (one tar, hardlinks preserved if both paths are in the archive) is an untested optimization, not a substitute for PR #12.
+**Conclusion:** “cannot archive `node_modules`” is **too strong**. “Should not skip `pnpm install` after restore” is **right** for this action’s consumers. Caching store + `node_modules` in one archive (store path first) **does** preserve hardlinks on macOS bsdtar; it is still not a substitute for PR #12, and it is untested on hosted Windows.
 
 ---
 
@@ -358,7 +373,7 @@ Attempt 1 PwrGit still lost *some* Corepack saves to **reservation races**, not 
 | `setup-node` does not cache Corepack / `node_modules` | **High** | source + README at v6/v7 SHAs |
 | pnpm install still needed after store restore | **High** | PwrGit postinstall; action `shouldInstallDependencies` |
 | `node_modules` *can* round-trip on macOS clone | **High** (that platform) | local tar + `require` |
-| `node_modules` round-trip on Windows/Linux hardlink | **Low–medium** | not reproduced here; GNU tar should copy out-of-archive hardlinks |
+| `node_modules` round-trip on Windows/Linux hardlink | **Medium** (Linux GNU tar) / **Low–medium** (Windows junctions) | macOS hardlink tar: 0 type-1 members, require() worked; GNU tar same inode rule **inferred**; Windows junctions untested |
 | Caching `node_modules` *and* skipping install is safe for Electron/native | **Low** | contradicted by PwrGit postinstall |
 | pnpm 12 via Corepack is safe | **Low** | upstream #873 |
 
@@ -407,5 +422,5 @@ Attempt 1 PwrGit still lost *some* Corepack saves to **reservation races**, not 
 
 ### Local experiment
 
-- Path: `/tmp/pnpm-cache-research/local-archive2` (ephemeral)
-- pnpm 10.33.0, Node 24.18.0, macOS ARM64, 2026-09-17
+- Path: `/tmp/pnpm-cache-research/local-archive2` (clone/`auto`) and `/tmp/pnpm-archive-exp` (hardlink)
+- pnpm 10.33.0, Node 24.18.0, macOS ARM64, bsdtar 3.5.3, 2026-09-17
