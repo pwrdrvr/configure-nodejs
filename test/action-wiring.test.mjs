@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'fs';
+import { createRequire } from 'node:module';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
@@ -67,7 +68,7 @@ function stepValue(id, key, lines = actionLines) {
 
 function cacheKeyLines() {
   return actionLines
-    .filter((line) => /^\s*key: /.test(line))
+    .filter((line) => /^\s*key: /.test(line) && !line.includes('resolve-corepack-cache'))
     .map((line) => line.trim().slice('key: '.length));
 }
 
@@ -321,5 +322,60 @@ test('every inline github-script body parses', () => {
         ),
       `action.yml:${block.line} inline script does not parse`,
     );
+  }
+});
+
+test('Corepack restores before activation and saves before dependency installation', () => {
+  const resolve = stepBlock('resolve-corepack-cache');
+  const restore = stepBlock('cache-corepack');
+  const prepare = stepBlock('prepare-package-manager');
+  const save = stepBlock('save-corepack');
+  assert.ok(resolve.first < restore.first && restore.first < prepare.first);
+  assert.ok(prepare.first < save.first && save.first < stepBlock('install-dependencies').first);
+  for (const block of [restore, save]) {
+    assert.match(block.lines.join('\n'), /key: \$\{\{ steps.resolve-corepack-cache.outputs.key \}\}/);
+    assert.match(block.lines.join('\n'), /path: \$\{\{ steps.resolve-corepack-cache.outputs.home \}\}/);
+  }
+  assert.match(stepValue('resolve-corepack-cache', 'if'), /needsCorepack == 'true'/);
+  assert.match(stepValue('resolve-corepack-cache', 'if'), /inputs.lookup-only != 'true' \|\| steps.cache-dependencies.outputs.cache-hit != 'true'/);
+  assert.match(stepValue('save-corepack', 'if'), /steps.cache-corepack.outputs.cache-hit != 'true'/);
+  assert.doesNotMatch(stepValue('save-corepack', 'if'), /always\(\)/);
+});
+
+
+test('Corepack options preserve external homes and bypass restore/save outputs', async () => {
+  const step = stepBlock('resolve-corepack-cache');
+  const script = inlineScripts().find((block) => block.line >= step.first && block.line < step.last);
+  const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+  const run = new AsyncFunction('core', 'require', 'process', script.body);
+  assert.match(step.lines.join('\n'), /CONFIGURE_NODEJS_CACHE_COREPACK: \$\{\{ inputs.cache-corepack \}\}/);
+  assert.match(actionYaml, /  cache-corepack:\r?\n    description: .*\r?\n    default: "true"/);
+  for (const [enabled, home] of [['false', ''], ['true', '/caller/corepack'], ['false', '/caller/corepack'], ['true', '']]) {
+    const env = {
+      CONFIGURE_NODEJS_CACHE_COREPACK: enabled,
+      CONFIGURE_NODEJS_PACKAGE_MANAGER: 'pnpm',
+      CONFIGURE_NODEJS_PACKAGE_MANAGER_VERSION: '10.33.0',
+      CONFIGURE_NODEJS_RUNNER_OS: 'Linux',
+      CONFIGURE_NODEJS_RUNNER_ARCH: 'X64',
+      GITHUB_ACTION_PATH: path.dirname(actionPath),
+      RUNNER_TEMP: path.dirname(actionPath),
+      COREPACK_HOME: home,
+    };
+    const outputs = {};
+    const exports = {};
+    await run({
+      setOutput: (key, value) => { outputs[key] = value; },
+      exportVariable: (key, value) => { exports[key] = value; },
+    }, createRequire(import.meta.url), { env });
+    if (enabled === 'false' || home) {
+      assert.equal(outputs.key, undefined);
+      assert.equal(outputs.home, undefined);
+      assert.deepEqual(exports, {});
+      assert.equal(env.COREPACK_HOME, home);
+    } else {
+      assert.ok(outputs.key);
+      assert.equal(exports.COREPACK_HOME, outputs.home);
+      assert.equal(exports.CONFIGURE_NODEJS_MANAGED_COREPACK_HOME, outputs.home);
+    }
   }
 });

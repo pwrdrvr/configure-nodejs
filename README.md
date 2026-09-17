@@ -229,6 +229,7 @@ By the time `Test` ran the cache was already written. If `Test` had failed, the 
 | `package-manager` | `""` | Optional override for `npm`, `pnpm`, or `yarn`; by default the action follows the package manager inferred from `package.json` and the lockfile present |
 | `working-directory` | `"."` | Repository-relative directory containing `package.json` and the lockfile |
 | `cache-key-suffix` | `""` | Optional suffix appended to the dependency cache key when you want to namespace cache entries |
+| `cache-corepack` | `"true"` | Cache pinned pnpm/Yarn executables. Set to `"false"` to disable the separate Corepack cache. Caller-supplied `COREPACK_HOME` is preserved and left caller-managed |
 | `cache-electron` | `"false"` | When `true`, caches the workspace-local Electron runtime download cache and native-addon prebuild download cache, and points lifecycle scripts at them. See [Electron lifecycle download caches](#electron-lifecycle-download-caches) |
 | `lookup-only` | `"false"` | When `true`, only checks whether the cache exists and skips downloading it; on a cache hit the action also skips `setup-node` and install-time package-manager setup. See [the gate job pattern](#the-fix-a-gate-job-that-only-primes-the-cache) |
 
@@ -245,6 +246,13 @@ The major is what matters because `NODE_MODULE_VERSION` — the ABI every compil
 | pnpm | workspace-local `.pnpm-store` | `pnpm install --frozen-lockfile --store-dir .pnpm-store` re-runs against the warm store |
 
 For pnpm, `cache-hit` means *the store cache was found*. It does not mean `node_modules` was restored. Cache paths and keys are scoped to `working-directory`, so subdirectory apps in a monorepo stay isolated. The action exports `npm_config_store_dir` for later workflow steps so follow-up pnpm commands use the same store.
+
+By default, pinned pnpm and Yarn executables are cached separately in an action-managed `COREPACK_HOME` under the runner's temporary directory. This cache is keyed by OS, architecture, and the full package-manager version (including any integrity hash), independently of the lockfile, working directory, and dependency cache suffix. It restores before activation and saves immediately after successful preparation. Corepack still enables the shims and verifies the version on a cache hit, but can reuse the downloaded executable without fetching it again.
+
+Set `cache-corepack: "false"` to disable this cache without changing package-manager activation or dependency caching. If you supply a nonempty `COREPACK_HOME`, the action preserves it and skips its own Corepack cache restore/save; you manage that directory and any caching yourself. A home exported by an earlier invocation of this action in the same job remains action-managed, so subsequent invocations can still restore it or select another pinned version.
+
+Unpinned versions, ranges, and URL selectors do not use this separate cache. A `lookup-only` dependency cache hit skips Corepack setup and restore as before. The existing `cache-hit` output and cache restore/save timing outputs describe the dependency cache; Corepack cache transfer time is included only in the total duration.
+
 
 ### Electron lifecycle download caches
 
