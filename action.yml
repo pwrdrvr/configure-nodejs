@@ -14,6 +14,9 @@ inputs:
   cache-key-suffix:
     description: "Optional suffix appended to the dependency cache key for namespacing"
     default: ""
+  cache-corepack:
+    description: "Cache pinned pnpm/Yarn executables unless COREPACK_HOME is caller-managed"
+    default: "true"
   cache-electron:
     description: "If true, cache workspace-local Electron runtime and native-addon downloads used by lifecycle scripts"
     default: "false"
@@ -300,6 +303,7 @@ runs:
       if: steps.resolve-package-manager.outputs.needsCorepack == 'true' && (inputs.lookup-only != 'true' || steps.cache-dependencies.outputs.cache-hit != 'true')
       uses: actions/github-script@v8
       env:
+        CONFIGURE_NODEJS_CACHE_COREPACK: ${{ inputs.cache-corepack }}
         CONFIGURE_NODEJS_PACKAGE_MANAGER: ${{ steps.resolve-package-manager.outputs.packageManager }}
         CONFIGURE_NODEJS_PACKAGE_MANAGER_VERSION: ${{ steps.resolve-package-manager.outputs.packageManagerVersion }}
         CONFIGURE_NODEJS_RUNNER_OS: ${{ runner.os }}
@@ -313,6 +317,9 @@ runs:
             path.join(process.env.GITHUB_ACTION_PATH, 'scripts', 'resolve-corepack-cache.mjs'),
           ).href);
           const result = resolveCorepackCache({
+            enabled: process.env.CONFIGURE_NODEJS_CACHE_COREPACK === 'true',
+            corepackHome: process.env.COREPACK_HOME ?? '',
+            managedCorepackHome: process.env.CONFIGURE_NODEJS_MANAGED_COREPACK_HOME ?? '',
             manager: process.env.CONFIGURE_NODEJS_PACKAGE_MANAGER,
             version: process.env.CONFIGURE_NODEJS_PACKAGE_MANAGER_VERSION,
             runnerTemp: process.env.RUNNER_TEMP,
@@ -321,6 +328,7 @@ runs:
           });
           if (result) {
             core.exportVariable('COREPACK_HOME', result.home);
+            core.exportVariable('CONFIGURE_NODEJS_MANAGED_COREPACK_HOME', result.home);
             core.setOutput('home', result.home);
             core.setOutput('key', result.key);
           }

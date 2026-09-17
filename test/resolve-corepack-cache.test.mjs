@@ -25,3 +25,23 @@ test('mutable selectors and npm do not enable Corepack caching', () => {
   assert.equal(resolveCorepackCache({ ...base, manager: 'npm' }), null);
   assert.ok(resolveCorepackCache({ ...base, version: '11.0.0-rc.1' }));
 });
+
+test('opt-out disables caching even for an existing action-managed home', () => {
+  const home = resolveCorepackCache(base).home;
+  assert.equal(resolveCorepackCache({ ...base, enabled: false }), null);
+  assert.equal(resolveCorepackCache({ ...base, enabled: false, corepackHome: home, managedCorepackHome: home }), null);
+});
+
+test('caller-supplied homes remain unmanaged, even if they resemble our default', () => {
+  for (const corepackHome of ['/custom/corepack', 'C:\\custom\\corepack', resolveCorepackCache(base).home]) {
+    assert.equal(resolveCorepackCache({ ...base, corepackHome }), null);
+  }
+  assert.equal(resolveCorepackCache({ ...base, corepackHome: '/new/home', managedCorepackHome: '/old/home' }), null);
+});
+
+test('repeated invocations can restore an action-managed home and change versions', () => {
+  const original = resolveCorepackCache(base);
+  const existing = { corepackHome: original.home, managedCorepackHome: original.home };
+  assert.deepEqual(resolveCorepackCache({ ...base, ...existing }), original);
+  assert.notEqual(resolveCorepackCache({ ...base, ...existing, version: '10.34.0' }).home, original.home);
+});
