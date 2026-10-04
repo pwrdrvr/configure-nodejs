@@ -269,6 +269,10 @@ export function buildResult({
   const normalizedCacheKeySuffix = normalizeCacheKeySuffix(cacheKeySuffix);
   const normalizedCacheElectron = normalizeCacheElectron(cacheElectron);
   const normalizedPackageManager = normalizePackageManager(packageManager);
+  if (dependencyCache === 'node-modules') {
+    assertPathWithinDirectory({ boundaryPath: cwd, candidatePath: resolvedWorkingDirectory.absoluteWorkingDirectory, description: 'Working directory', allowEqual: true });
+    assertPathWithinDirectory({ boundaryPath: resolvedWorkingDirectory.absoluteWorkingDirectory, candidatePath: path.join(resolvedWorkingDirectory.absoluteWorkingDirectory, '.cache/configure-nodejs/completed-tree.json'), description: 'Completed tree metadata' });
+  }
   const electronCachePaths = normalizedCacheElectron
     ? buildElectronCachePaths(resolvedWorkingDirectory.workingDirectory)
     : [];

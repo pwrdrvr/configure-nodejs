@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { installationInputsHash, buildCompletedKey, validateCacheMode, completePopulation, verifyCompletedTree, METADATA_PATH } from '../scripts/completed-tree.mjs';
+import { installationInputsHash, buildCompletedKey, validateCacheMode, completePopulation, verifyCompletedTree, removeMaterializedDependencies, METADATA_PATH } from '../scripts/completed-tree.mjs';
 import { shouldInstallDependencies, shouldDiscardRestoredDependencies } from '../scripts/resolve-node-version.mjs';
 import { buildResult } from '../scripts/resolve-cache-paths.mjs';
 import { hasCacheableDependencyPath } from '../scripts/detect-cache-paths.mjs';
@@ -96,4 +96,30 @@ test('default store paths and namespace remain distinct from completed trees', (
   assert.equal(completed.primaryCachePath, 'node_modules');
   assert.ok(completed.cachePaths.includes(METADATA_PATH));
   assert.ok(!completed.cachePaths.includes('.pnpm-store'));
+});
+
+test('subdirectory keys hash inherited policy and additional repository files', (t) => {
+  const { cwd } = fixture(t);
+  const child = path.join(cwd, 'packages/app');
+  fs.mkdirSync(child, { recursive: true });
+  fs.writeFileSync(path.join(child, 'package.json'), '{}');
+  fs.writeFileSync(path.join(child, 'pnpm-lock.yaml'), 'lockfileVersion: 9');
+  const args = { cwd: child, repositoryRoot: cwd, lockfilePath: 'pnpm-lock.yaml', cacheInputs: '../../patch.diff' };
+  const initial = installationInputsHash(args);
+  fs.appendFileSync(path.join(cwd, '.npmrc'), '# inherited policy');
+  assert.notEqual(installationInputsHash(args), initial);
+  const changedPolicy = installationInputsHash(args);
+  fs.appendFileSync(path.join(cwd, 'patch.diff'), '# patch');
+  assert.notEqual(installationInputsHash(args), changedPolicy);
+});
+
+test('cold population removes existing trees and stale metadata before installing', (t) => {
+  const { cwd } = fixture(t);
+  fs.mkdirSync(path.join(cwd, 'packages/app/node_modules'), { recursive: true });
+  fs.mkdirSync(path.join(cwd, '.pnpm-store'), { recursive: true });
+  fs.mkdirSync(path.dirname(path.join(cwd, METADATA_PATH)), { recursive: true });
+  fs.writeFileSync(path.join(cwd, METADATA_PATH), 'stale');
+  removeMaterializedDependencies(cwd);
+  for (const name of ['node_modules', 'packages/app/node_modules', '.pnpm-store', METADATA_PATH]) assert.equal(fs.existsSync(path.join(cwd, name)), false);
+  assert.equal(fs.existsSync(path.join(cwd, 'pnpm-lock.yaml')), true);
 });

@@ -683,7 +683,7 @@ jobs:
                 arch: process.env.RUNNER_ARCH_NAME,
                 imageOS: process.env.ImageOS ?? '',
                 workingDirectory: process.env.FIXTURE,
-                inputsHash: installationInputsHash({ cwd, lockfilePath: manager.lockfilePath }),
+                inputsHash: installationInputsHash({ cwd, lockfilePath: manager.lockfilePath, repositoryRoot: process.env.GITHUB_WORKSPACE }),
                 actionRevision: actionSourceHash(process.env.GITHUB_WORKSPACE),
                 cacheKeySuffix: `${process.env.CACHE_SUFFIX}-${kind}`,
               }));
@@ -841,3 +841,47 @@ jobs:
             const fs = require('fs');
             assert.equal(process.env.OUTCOME, 'failure');
             assert.equal(fs.readFileSync(process.env.LIFECYCLE_LOG, 'utf8'), 'postinstall\npostinstall\npostinstall\n');
+
+  completed-consumer:
+    name: Completed consumer (${{ matrix.os }}, ${{ matrix.fixture }})
+    needs: completed-tree
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        fixture: [pnpm-basic, pnpm12-basic]
+    env:
+      PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN: 'false'
+    steps:
+      - uses: actions/checkout@v6
+      - name: Instrument lifecycle execution
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const path = require('path');
+            core.exportVariable('LIFECYCLE_LOG', path.join(process.env.RUNNER_TEMP, 'consumer-lifecycle.log'));
+      - name: Restore producer entry in a fresh job
+        id: restore
+        uses: ./
+        with:
+          node-version: '24'
+          working-directory: fixtures/${{ matrix.fixture }}
+          dependency-cache: node-modules
+          cache-mode: restore
+          cache-key-suffix: completed-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Validate restored links and native binary
+        working-directory: fixtures/${{ matrix.fixture }}
+        run: node check.mjs
+      - name: Validate consumer never installed or saved dependencies
+        uses: actions/github-script@v8
+        env:
+          INSTALL_MS: ${{ steps.restore.outputs.install-duration-ms }}
+          SAVE_MS: ${{ steps.restore.outputs.cache-save-duration-ms }}
+        with:
+          script: |
+            const fs = require('fs');
+            const assert = require('assert/strict');
+            assert.equal(fs.existsSync(process.env.LIFECYCLE_LOG), false);
+            assert.equal(process.env.INSTALL_MS, '0');
+            assert.equal(process.env.SAVE_MS, '0');

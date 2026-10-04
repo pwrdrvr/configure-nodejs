@@ -304,6 +304,7 @@ runs:
           if (process.env.CONFIGURE_NODEJS_DEPENDENCY_CACHE === 'node-modules') {
             const inputsHash = installationInputsHash({
               cwd: result.absoluteWorkingDirectory,
+              repositoryRoot: process.env.GITHUB_WORKSPACE,
               lockfilePath: process.env.CONFIGURE_NODEJS_LOCKFILE_PATH,
               cacheInputs: process.env.CONFIGURE_NODEJS_CACHE_INPUTS,
             });
@@ -606,6 +607,12 @@ runs:
               );
             }
 
+            const { assertPathWithinDirectory } = await import(pathToFileURL(
+              path.join(process.env.GITHUB_ACTION_PATH, 'scripts', 'resolve-cache-paths.mjs'),
+            ).href);
+            assertPathWithinDirectory({ boundaryPath: cwd, candidatePath: expectedStorePath, description: 'pnpm workspace store' });
+            fs.mkdirSync(expectedStorePath, { recursive: true });
+            assertPathWithinDirectory({ boundaryPath: expectedStorePath, candidatePath: discoveredStorePath, description: 'Discovered pnpm store', allowEqual: true });
             core.info(`Using pnpm store ${discoveredStorePath}.`);
             core.setOutput('pnpmStorePath', discoveredStorePath);
             storeDiscoveryDurationMs = Date.now() - storeDiscoveryStartedAt;
@@ -657,6 +664,14 @@ runs:
           const startedAt = Date.now();
           const executable = process.env.CONFIGURE_NODEJS_INSTALL_EXECUTABLE;
           const args = JSON.parse(process.env.CONFIGURE_NODEJS_INSTALL_ARGUMENTS);
+          if (process.env.CONFIGURE_NODEJS_DEPENDENCY_CACHE === 'node-modules') {
+            const path = require('path');
+            const { pathToFileURL } = require('url');
+            const { removeMaterializedDependencies } = await import(pathToFileURL(
+              path.join(process.env.GITHUB_ACTION_PATH, 'scripts', 'completed-tree.mjs'),
+            ).href);
+            removeMaterializedDependencies(process.env.CONFIGURE_NODEJS_ABSOLUTE_WORKING_DIRECTORY);
+          }
           await exec.exec(executable, args, {
             cwd: process.env.CONFIGURE_NODEJS_ABSOLUTE_WORKING_DIRECTORY,
           });
@@ -668,6 +683,7 @@ runs:
             ).href);
             completePopulation({
               cwd: process.env.CONFIGURE_NODEJS_ABSOLUTE_WORKING_DIRECTORY,
+              repositoryRoot: process.env.GITHUB_WORKSPACE,
               key: process.env.CONFIGURE_NODEJS_CACHE_KEY,
               nodeMajor: process.env.CONFIGURE_NODEJS_NODE_MAJOR,
               nodeABI: process.env.CONFIGURE_NODEJS_NODE_ABI,

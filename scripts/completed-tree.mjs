@@ -20,11 +20,11 @@ export function validateCacheMode({ dependencyCache = 'default', cacheMode = 'au
   }
 }
 
-function digestFiles(root, names) {
+function digestFiles(root, names, boundary = root) {
   const hash = crypto.createHash('sha256');
   for (const name of [...new Set(names)].sort()) {
     const file = path.resolve(root, name);
-    assertPathWithinDirectory({ boundaryPath: root, candidatePath: file, description: 'Installation input' });
+    assertPathWithinDirectory({ boundaryPath: boundary, candidatePath: file, description: 'Installation input' });
     const bytes = fs.existsSync(file) ? fs.readFileSync(file) : null;
     hash.update(JSON.stringify([name.split(path.sep).join('/'), bytes?.length ?? null]));
     if (bytes) hash.update(bytes);
@@ -33,7 +33,9 @@ function digestFiles(root, names) {
 }
 
 // Include workspace manifests/config without globbing materialized dependencies.
-export function installationInputsHash({ cwd, lockfilePath, cacheInputs = '' }) {
+export function installationInputsHash({ cwd, lockfilePath, cacheInputs = '', repositoryRoot = cwd }) {
+  cwd = path.resolve(cwd);
+  repositoryRoot = path.resolve(repositoryRoot);
   const names = [lockfilePath, 'package.json', 'pnpm-workspace.yaml', '.npmrc', '.pnpmfile.cjs'];
   const ignored = new Set(['.git', 'node_modules', '.pnpm-store', '.cache', '.yarn']);
   const visit = (directory) => {
@@ -46,12 +48,20 @@ export function installationInputsHash({ cwd, lockfilePath, cacheInputs = '' }) 
     }
   };
   visit(cwd);
+  assertPathWithinDirectory({ boundaryPath: repositoryRoot, candidatePath: cwd, description: 'Working directory', allowEqual: true });
+  for (let ancestor = path.dirname(cwd); ancestor !== path.dirname(repositoryRoot); ancestor = path.dirname(ancestor)) {
+    if (path.resolve(cwd) === path.resolve(repositoryRoot)) break;
+    for (const name of ['package.json', '.npmrc', 'pnpm-workspace.yaml', '.pnpmfile.cjs']) {
+      names.push(path.relative(cwd, path.join(ancestor, name)));
+    }
+    if (ancestor === path.resolve(repositoryRoot)) break;
+  }
   for (const name of cacheInputs.split(/\r?\n/).map((value) => value.trim()).filter(Boolean)) {
     if (path.isAbsolute(name)) throw new Error('cache-inputs paths must be relative to working-directory.');
     if (!fs.existsSync(path.resolve(cwd, name))) throw new Error(`Additional installation input does not exist: ${name}`);
     names.push(name);
   }
-  return digestFiles(cwd, names);
+  return digestFiles(cwd, names, repositoryRoot);
 }
 
 export function actionSourceHash(actionPath) {
@@ -71,6 +81,19 @@ export function verifyLockfile({ cwd, lockfilePath, lockfileSha }) {
   if (sha !== lockfileSha) throw new Error('Frozen installation changed the original lockfile; refusing to save completed dependencies.');
 }
 
+export function removeMaterializedDependencies(cwd) {
+  const visit = (directory) => {
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      const file = path.join(directory, entry.name);
+      if (entry.name === 'node_modules') fs.rmSync(file, { recursive: true, force: true });
+      else if (entry.isDirectory() && !['.git', '.pnpm-store', '.cache'].includes(entry.name)) visit(file);
+    }
+  };
+  visit(cwd);
+  fs.rmSync(path.join(cwd, '.pnpm-store'), { recursive: true, force: true });
+  fs.rmSync(path.join(cwd, METADATA_PATH), { force: true });
+}
+
 export function verifyCompletedTree({ cwd, key, nodeMajor, nodeABI }) {
   const metadata = JSON.parse(fs.readFileSync(path.join(cwd, METADATA_PATH), 'utf8'));
   if (metadata.key !== key || metadata.nodeMajor !== Number(nodeMajor) || metadata.nodeABI !== String(nodeABI)) {
@@ -79,9 +102,9 @@ export function verifyCompletedTree({ cwd, key, nodeMajor, nodeABI }) {
   if (!fs.existsSync(path.join(cwd, 'node_modules/.pnpm'))) throw new Error('Completed pnpm dependency tree is missing its virtual store.');
 }
 
-export function completePopulation({ cwd, key, nodeMajor, nodeABI, lockfilePath, lockfileSha, inputsHash, cacheInputs = '' }) {
+export function completePopulation({ cwd, key, nodeMajor, nodeABI, lockfilePath, lockfileSha, inputsHash, cacheInputs = '', repositoryRoot = cwd }) {
   verifyLockfile({ cwd, lockfilePath, lockfileSha });
-  if (installationInputsHash({ cwd, lockfilePath, cacheInputs }) !== inputsHash) {
+  if (installationInputsHash({ cwd, lockfilePath, cacheInputs, repositoryRoot }) !== inputsHash) {
     throw new Error('Installation changed an input; refusing to save completed dependencies.');
   }
   if (!fs.existsSync(path.join(cwd, 'node_modules/.pnpm'))) throw new Error('Installation did not produce a pnpm virtual store.');
