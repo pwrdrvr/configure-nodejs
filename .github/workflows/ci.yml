@@ -339,6 +339,7 @@ jobs:
         package-manager:
           - npm
           - pnpm
+          - pnpm12
           - yarn
     steps:
       - uses: actions/checkout@v6
@@ -354,7 +355,7 @@ jobs:
       - name: Validate primed install and outputs
         uses: actions/github-script@v8
         env:
-          EXPECTED_PACKAGE_MANAGER: ${{ matrix.package-manager }}
+          EXPECTED_PACKAGE_MANAGER: ${{ matrix.package-manager == 'pnpm12' && 'pnpm' || matrix.package-manager }}
           EXPECTED_WORKING_DIRECTORY: fixtures/${{ matrix.package-manager }}-basic
           ACTUAL_PACKAGE_MANAGER: ${{ steps.prime.outputs.package-manager }}
           ACTUAL_WORKING_DIRECTORY: ${{ steps.prime.outputs.working-directory }}
@@ -401,6 +402,7 @@ jobs:
                   !relativeStorePath.startsWith(`..${path.sep}`) &&
                   !path.isAbsolute(relativeStorePath),
               );
+              assert.equal(normalizeForComparison(process.env.PNPM_CONFIG_STORE_DIR), normalizeForComparison(expectedStoreRoot));
               assert.equal(
                 normalizeForComparison(process.env.npm_config_store_dir),
                 normalizeForComparison(expectedStoreRoot),
@@ -485,3 +487,401 @@ jobs:
       - name: Validate restored dependency
         working-directory: fixtures/${{ matrix.package-manager }}-basic
         run: node check.mjs
+
+  completed-tree:
+    name: Completed tree (${{ matrix.os }}, ${{ matrix.fixture }})
+    needs: unit
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        fixture: [pnpm-basic, pnpm12-basic]
+    env:
+      FIXTURE: fixtures/${{ matrix.fixture }}
+      CACHE_SUFFIX: completed-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Instrument project lifecycle scripts
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const path = require('path');
+            core.exportVariable('LIFECYCLE_LOG', path.join(process.env.RUNNER_TEMP, 'completed-lifecycle.log'));
+
+      - name: Populate a fresh completed tree
+        id: prime
+        uses: ./
+        with:
+          node-version: '24'
+          working-directory: ${{ env.FIXTURE }}
+          dependency-cache: node-modules
+          cache-mode: populate
+          cache-key-suffix: ${{ env.CACHE_SUFFIX }}
+
+      - name: Validate cold install and portable store
+        uses: actions/github-script@v8
+        env:
+          CACHE_HIT: ${{ steps.prime.outputs.cache-hit }}
+          STORE_PATH: ${{ steps.prime.outputs.pnpm-store-path }}
+        with:
+          script: |
+            const assert = require('assert/strict');
+            const fs = require('fs');
+            const path = require('path');
+            assert.notEqual(process.env.CACHE_HIT, 'true');
+            assert.equal(fs.readFileSync(process.env.LIFECYCLE_LOG, 'utf8'), 'postinstall\n');
+            const storeRoot = path.join(process.env.GITHUB_WORKSPACE, process.env.FIXTURE, '.pnpm-store');
+            assert.equal(path.resolve(process.env.PNPM_CONFIG_STORE_DIR), storeRoot);
+            assert.equal(path.resolve(process.env.npm_config_store_dir), storeRoot);
+            assert.ok(!path.relative(storeRoot, process.env.STORE_PATH).startsWith('..'));
+
+      - name: Remove all materialized dependency content
+        run: node fixtures/remove-dependencies.mjs
+
+      - name: Probe warm producer without materializing dependencies
+        id: warm
+        uses: ./
+        with:
+          node-version: '24'
+          working-directory: ${{ env.FIXTURE }}
+          dependency-cache: node-modules
+          cache-mode: populate
+          cache-key-suffix: ${{ env.CACHE_SUFFIX }}
+
+      - name: Verify warm probe has no install or download
+        uses: actions/github-script@v8
+        env:
+          CACHE_HIT: ${{ steps.warm.outputs.cache-hit }}
+          PRIME_KEY: ${{ steps.prime.outputs.cache-key }}
+          WARM_KEY: ${{ steps.warm.outputs.cache-key }}
+        with:
+          script: |
+            const assert = require('assert/strict');
+            const fs = require('fs');
+            const path = require('path');
+            assert.equal(process.env.CACHE_HIT, 'true');
+            assert.equal(process.env.PRIME_KEY, process.env.WARM_KEY);
+            assert.equal(fs.existsSync(path.join(process.env.FIXTURE, 'node_modules')), false);
+            assert.equal(fs.existsSync(path.join(process.env.FIXTURE, '.pnpm-store')), false);
+            assert.equal(fs.readFileSync(process.env.LIFECYCLE_LOG, 'utf8'), 'postinstall\n');
+
+      - name: Restore strict consumer
+        id: restore
+        uses: ./
+        with:
+          node-version: '24'
+          working-directory: ${{ env.FIXTURE }}
+          dependency-cache: node-modules
+          cache-mode: restore
+          cache-key-suffix: ${{ env.CACHE_SUFFIX }}
+
+      - name: Validate restored links and native tooling
+        working-directory: ${{ env.FIXTURE }}
+        run: node check.mjs
+
+      - name: Validate exact shared key and no reinstall
+        uses: actions/github-script@v8
+        env:
+          PRIME_KEY: ${{ steps.prime.outputs.cache-key }}
+          RESTORE_KEY: ${{ steps.restore.outputs.cache-key }}
+          CACHE_HIT: ${{ steps.restore.outputs.cache-hit }}
+          INSTALL_MS: ${{ steps.restore.outputs.install-duration-ms }}
+          SAVE_MS: ${{ steps.restore.outputs.cache-save-duration-ms }}
+        with:
+          script: |
+            const assert = require('assert/strict');
+            const fs = require('fs');
+            assert.equal(process.env.PRIME_KEY, process.env.RESTORE_KEY);
+            assert.equal(process.env.CACHE_HIT, 'true');
+            assert.equal(process.env.INSTALL_MS, '0');
+            assert.equal(process.env.SAVE_MS, '0');
+            assert.equal(fs.readFileSync(process.env.LIFECYCLE_LOG, 'utf8'), 'postinstall\n');
+
+      - name: Materialize a release without implicit reinstall
+        if: matrix.fixture == 'pnpm12-basic'
+        working-directory: ${{ env.FIXTURE }}
+        env:
+          PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN: 'false'
+        run: |
+          npm version patch --no-git-tag-version --ignore-scripts
+          pnpm run check
+
+      - name: Verify release left lock and lifecycle count unchanged
+        if: matrix.fixture == 'pnpm12-basic'
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const assert = require('assert/strict');
+            const fs = require('fs');
+            await exec.exec('git', ['diff', '--exit-code', '--', `${process.env.FIXTURE}/pnpm-lock.yaml`]);
+            assert.equal(fs.readFileSync(process.env.LIFECYCLE_LOG, 'utf8'), 'postinstall\n');
+            await exec.exec('git', ['restore', '--', `${process.env.FIXTURE}/package.json`]);
+
+      - name: Remove dependencies before strict miss
+        run: node fixtures/remove-dependencies.mjs
+
+      - name: Require a hard miss to fail
+        id: miss
+        continue-on-error: true
+        uses: ./
+        with:
+          node-version: '24'
+          working-directory: ${{ env.FIXTURE }}
+          dependency-cache: node-modules
+          cache-mode: restore
+          cache-key-suffix: ${{ env.CACHE_SUFFIX }}-missing
+
+      - name: Require a different Node major to fail
+        id: major-miss
+        continue-on-error: true
+        uses: ./
+        with:
+          node-version: '22'
+          working-directory: ${{ env.FIXTURE }}
+          dependency-cache: node-modules
+          cache-mode: restore
+          cache-key-suffix: ${{ env.CACHE_SUFFIX }}
+
+      - name: Verify negative paths have zero install side effects
+        uses: actions/github-script@v8
+        env:
+          MISS_OUTCOME: ${{ steps.miss.outcome }}
+          MAJOR_OUTCOME: ${{ steps.major-miss.outcome }}
+        with:
+          script: |
+            const assert = require('assert/strict');
+            const fs = require('fs');
+            const path = require('path');
+            assert.equal(process.env.MISS_OUTCOME, 'failure');
+            assert.equal(process.env.MAJOR_OUTCOME, 'failure');
+            assert.equal(fs.existsSync(path.join(process.env.FIXTURE, 'node_modules')), false);
+            assert.equal(fs.existsSync(path.join(process.env.FIXTURE, '.pnpm-store')), false);
+            assert.equal(fs.readFileSync(process.env.LIFECYCLE_LOG, 'utf8'), 'postinstall\n');
+
+      - name: Calculate exact keys for negative entries
+        if: matrix.fixture == 'pnpm12-basic'
+        id: negative-keys
+        uses: actions/github-script@v8
+        env:
+          RUNNER_OS_NAME: ${{ runner.os }}
+          RUNNER_ARCH_NAME: ${{ runner.arch }}
+        with:
+          script: |
+            const path = require('path');
+            const { pathToFileURL } = require('url');
+            const { buildCompletedKey, installationInputsHash, actionSourceHash } = await import(pathToFileURL(path.resolve('scripts/completed-tree.mjs')).href);
+            const { buildResult } = await import(pathToFileURL(path.resolve('scripts/resolve-manager.mjs')).href);
+            const cwd = path.resolve(process.env.FIXTURE);
+            const manager = buildResult({ cwd, explicitManager: 'pnpm' });
+            for (const kind of ['failed', 'changed', 'abi']) {
+              core.setOutput(`${kind}Key`, buildCompletedKey({
+                nodeMajor: 24,
+                packageManagerVersion: manager.packageManagerVersion,
+                os: process.env.RUNNER_OS_NAME,
+                arch: process.env.RUNNER_ARCH_NAME,
+                imageOS: process.env.ImageOS ?? '',
+                workingDirectory: process.env.FIXTURE,
+                inputsHash: installationInputsHash({ cwd, lockfilePath: manager.lockfilePath, repositoryRoot: process.env.GITHUB_WORKSPACE }),
+                actionRevision: actionSourceHash(process.env.GITHUB_WORKSPACE),
+                cacheKeySuffix: `${process.env.CACHE_SUFFIX}-${kind}`,
+              }));
+            }
+
+      - name: Fail a cold project install
+        if: matrix.fixture == 'pnpm12-basic'
+        id: failed-install
+        continue-on-error: true
+        uses: ./
+        env:
+          FAIL_INSTALL: 'true'
+        with:
+          node-version: '24'
+          working-directory: ${{ env.FIXTURE }}
+          dependency-cache: node-modules
+          cache-mode: populate
+          cache-key-suffix: ${{ env.CACHE_SUFFIX }}-failed
+
+      - name: Verify failed population did not complete
+        if: matrix.fixture == 'pnpm12-basic'
+        uses: actions/github-script@v8
+        env:
+          OUTCOME: ${{ steps.failed-install.outcome }}
+        with:
+          script: |
+            const assert = require('assert/strict');
+            const fs = require('fs');
+            assert.equal(process.env.OUTCOME, 'failure');
+            assert.equal(fs.existsSync(`${process.env.FIXTURE}/.cache/configure-nodejs/completed-tree.json`), false);
+            assert.equal(fs.readFileSync(process.env.LIFECYCLE_LOG, 'utf8'), 'postinstall\npostinstall\n');
+
+      - name: Probe failed install key
+        if: matrix.fixture == 'pnpm12-basic'
+        id: failed-probe
+        uses: actions/cache/restore@v5
+        with:
+          path: |
+            ${{ env.FIXTURE }}/node_modules
+            ${{ env.FIXTURE }}/**/node_modules
+            ${{ env.FIXTURE }}/.cache/configure-nodejs/completed-tree.json
+          key: ${{ steps.negative-keys.outputs.failedKey }}
+          lookup-only: true
+
+      - name: Remove failed installation
+        if: matrix.fixture == 'pnpm12-basic'
+        run: node fixtures/remove-dependencies.mjs
+
+      - name: Reject lifecycle lock mutation
+        if: matrix.fixture == 'pnpm12-basic'
+        id: changed-lock
+        continue-on-error: true
+        uses: ./
+        env:
+          MUTATE_LOCK: 'true'
+        with:
+          node-version: '24'
+          working-directory: ${{ env.FIXTURE }}
+          dependency-cache: node-modules
+          cache-mode: populate
+          cache-key-suffix: ${{ env.CACHE_SUFFIX }}-changed
+
+      - name: Probe changed-lock install key
+        if: matrix.fixture == 'pnpm12-basic'
+        id: changed-probe
+        uses: actions/cache/restore@v5
+        with:
+          path: |
+            ${{ env.FIXTURE }}/node_modules
+            ${{ env.FIXTURE }}/**/node_modules
+            ${{ env.FIXTURE }}/.cache/configure-nodejs/completed-tree.json
+          key: ${{ steps.negative-keys.outputs.changedKey }}
+          lookup-only: true
+
+      - name: Verify neither failed population saved an entry
+        if: matrix.fixture == 'pnpm12-basic'
+        uses: actions/github-script@v8
+        env:
+          OUTCOME: ${{ steps.changed-lock.outcome }}
+          FAILED_HIT: ${{ steps.failed-probe.outputs.cache-hit }}
+          CHANGED_HIT: ${{ steps.changed-probe.outputs.cache-hit }}
+        with:
+          script: |
+            const assert = require('assert/strict');
+            const fs = require('fs');
+            assert.equal(process.env.OUTCOME, 'failure');
+            assert.notEqual(process.env.FAILED_HIT, 'true');
+            assert.notEqual(process.env.CHANGED_HIT, 'true');
+            assert.equal(fs.existsSync(`${process.env.FIXTURE}/.cache/configure-nodejs/completed-tree.json`), false);
+            assert.equal(fs.readFileSync(process.env.LIFECYCLE_LOG, 'utf8'), 'postinstall\npostinstall\npostinstall\n');
+            await exec.exec('git', ['restore', '--', `${process.env.FIXTURE}/pnpm-lock.yaml`]);
+
+      - name: Remove rejected tree
+        if: matrix.fixture == 'pnpm12-basic'
+        run: node fixtures/remove-dependencies.mjs
+
+      - name: Restore a valid tree to construct an incompatible test entry
+        if: matrix.fixture == 'pnpm12-basic'
+        uses: ./
+        with:
+          node-version: '24'
+          working-directory: ${{ env.FIXTURE }}
+          dependency-cache: node-modules
+          cache-mode: restore
+          cache-key-suffix: ${{ env.CACHE_SUFFIX }}
+
+      - name: Write incompatible ABI test metadata
+        if: matrix.fixture == 'pnpm12-basic'
+        uses: actions/github-script@v8
+        env:
+          ABI_KEY: ${{ steps.negative-keys.outputs.abiKey }}
+        with:
+          script: |
+            const fs = require('fs');
+            const file = `${process.env.FIXTURE}/.cache/configure-nodejs/completed-tree.json`;
+            const metadata = JSON.parse(fs.readFileSync(file, 'utf8'));
+            metadata.key = process.env.ABI_KEY;
+            metadata.nodeABI = 'incompatible-test-ABI';
+            fs.writeFileSync(file, JSON.stringify(metadata));
+
+      - name: Save incompatible test entry outside the action
+        if: matrix.fixture == 'pnpm12-basic'
+        uses: actions/cache/save@v5
+        with:
+          path: |
+            ${{ env.FIXTURE }}/node_modules
+            ${{ env.FIXTURE }}/**/node_modules
+            ${{ env.FIXTURE }}/.cache/configure-nodejs/completed-tree.json
+          key: ${{ steps.negative-keys.outputs.abiKey }}
+
+      - name: Remove incompatible test tree before restoring
+        if: matrix.fixture == 'pnpm12-basic'
+        run: node fixtures/remove-dependencies.mjs
+
+      - name: Reject incompatible ABI without repair
+        if: matrix.fixture == 'pnpm12-basic'
+        id: abi-mismatch
+        continue-on-error: true
+        uses: ./
+        with:
+          node-version: '24'
+          working-directory: ${{ env.FIXTURE }}
+          dependency-cache: node-modules
+          cache-mode: restore
+          cache-key-suffix: ${{ env.CACHE_SUFFIX }}-abi
+
+      - name: Verify incompatible ABI did not rerun project lifecycle
+        if: matrix.fixture == 'pnpm12-basic'
+        uses: actions/github-script@v8
+        env:
+          OUTCOME: ${{ steps.abi-mismatch.outcome }}
+        with:
+          script: |
+            const assert = require('assert/strict');
+            const fs = require('fs');
+            assert.equal(process.env.OUTCOME, 'failure');
+            assert.equal(fs.readFileSync(process.env.LIFECYCLE_LOG, 'utf8'), 'postinstall\npostinstall\npostinstall\n');
+
+  completed-consumer:
+    name: Completed consumer (${{ matrix.os }}, ${{ matrix.fixture }})
+    needs: completed-tree
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        fixture: [pnpm-basic, pnpm12-basic]
+    env:
+      PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN: 'false'
+    steps:
+      - uses: actions/checkout@v6
+      - name: Instrument lifecycle execution
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const path = require('path');
+            core.exportVariable('LIFECYCLE_LOG', path.join(process.env.RUNNER_TEMP, 'consumer-lifecycle.log'));
+      - name: Restore producer entry in a fresh job
+        id: restore
+        uses: ./
+        with:
+          node-version: '24'
+          working-directory: fixtures/${{ matrix.fixture }}
+          dependency-cache: node-modules
+          cache-mode: restore
+          cache-key-suffix: completed-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Validate restored links and native binary
+        working-directory: fixtures/${{ matrix.fixture }}
+        run: node check.mjs
+      - name: Validate consumer never installed or saved dependencies
+        uses: actions/github-script@v8
+        env:
+          INSTALL_MS: ${{ steps.restore.outputs.install-duration-ms }}
+          SAVE_MS: ${{ steps.restore.outputs.cache-save-duration-ms }}
+        with:
+          script: |
+            const fs = require('fs');
+            const assert = require('assert/strict');
+            assert.equal(fs.existsSync(process.env.LIFECYCLE_LOG), false);
+            assert.equal(process.env.INSTALL_MS, '0');
+            assert.equal(process.env.SAVE_MS, '0');

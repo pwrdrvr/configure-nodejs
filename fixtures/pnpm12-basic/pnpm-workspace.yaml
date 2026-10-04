@@ -1,0 +1,4 @@
+packageImportMethod: auto
+pmOnFail: ignore
+allowBuilds:
+  esbuild: true
