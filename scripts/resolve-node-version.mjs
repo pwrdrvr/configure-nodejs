@@ -181,7 +181,12 @@ export function shouldDiscardRestoredDependencies({
   packageManager,
   cacheHit,
   mismatch,
+  dependencyCache = 'default',
 }) {
+  if (dependencyCache === 'node-modules') {
+    if (mismatch) throw new Error('Completed dependency tree Node major mismatch; installation/repair is forbidden.');
+    return false;
+  }
   return Boolean(mismatch) && cacheHit === true && packageManager !== 'pnpm';
 }
 
@@ -194,7 +199,16 @@ export function shouldInstallDependencies({
   cacheHit,
   lookupOnly,
   mismatch,
+  dependencyCache = 'default',
+  cacheMode = 'auto',
 }) {
+  if (dependencyCache === 'node-modules') {
+    if (mismatch) throw new Error('Completed dependency tree Node major mismatch; installation/repair is forbidden.');
+    if (cacheMode === 'restore' && cacheHit !== true) {
+      throw new Error('Exact completed dependency cache miss; strict restore forbids installation.');
+    }
+    return cacheMode === 'populate' && cacheHit !== true;
+  }
   if (cacheHit !== true) {
     return true;
   }

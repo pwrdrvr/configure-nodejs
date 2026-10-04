@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'fs';
+import os from 'node:os';
+import crypto from 'node:crypto';
 import { createRequire } from 'node:module';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -68,7 +70,7 @@ function stepValue(id, key, lines = actionLines) {
 
 function cacheKeyLines() {
   return actionLines
-    .filter((line) => /^\s*key: /.test(line) && !line.includes('resolve-corepack-cache'))
+    .filter((line) => /^ {8}key: /.test(line) && !line.includes('resolve-corepack-cache'))
     .map((line) => line.trim().slice('key: '.length));
 }
 
@@ -121,7 +123,8 @@ function inlineScripts() {
 test('restore and save use one identical dependency cache key', () => {
   const keys = cacheKeyLines();
 
-  assert.equal(keys.length, 2, 'expected exactly one restore key and one save key');
+  assert.equal(keys.length, 3, 'expected restore, save, and completed save-confirmation keys');
+  assert.equal(keys[0], keys[2]);
   assert.equal(
     keys[0],
     keys[1],
@@ -129,42 +132,13 @@ test('restore and save use one identical dependency cache key', () => {
   );
 });
 
-test('the dependency cache key is built from the resolved Node.js major', () => {
-  const [key] = cacheKeyLines();
-
-  assert.match(
-    key,
-    /\$\{\{ steps\.resolve-dependency-cache-paths\.outputs\.nodeCacheKeySegment \}\}/,
-  );
-  assert.doesNotMatch(
-    key,
-    /inputs\.node-version/,
-    'interpolating the raw node-version input lets a floating spec such as lts/* keep one key across a major bump',
-  );
-});
-
-test('Electron caching is opt-in and schema-keyed without changing the default key', () => {
-  const inputsBlock = linesOf(
-    actionYaml.slice(
-      actionYaml.indexOf('\ninputs:'),
-      actionYaml.indexOf('\noutputs:'),
-    ),
-  ).join('\n');
-  const [key] = cacheKeyLines();
-
-  assert.match(
-    inputsBlock,
-    /  cache-electron:\n    description: .*\n    default: "false"/,
-  );
-  assert.match(
-    key,
-    /\$\{\{ steps\.resolve-dependency-cache-paths\.outputs\.electronCacheKeySegment \}\}/,
-  );
-  assert.match(
-    key,
-    /lockfileSha \}\}\$\{\{ steps\.resolve-dependency-cache-paths\.outputs\.electronCacheKeySegment \}\}\$\{\{ steps\.resolve-cache-paths\.outputs\.cacheKeySuffixSegment \}\}$/,
-    'the optional Electron segment must be empty when disabled and precede the existing suffix when enabled',
-  );
+test('the shared key output retains the default key and isolates completed trees', () => {
+  assert.equal(cacheKeyLines()[0], '${{ steps.resolve-dependency-cache-paths.outputs.cacheKey }}');
+  const block = stepBlock('resolve-dependency-cache-paths').lines.join('\n');
+  assert.match(block, /nodeVersion.nodeCacheKeySegment/);
+  assert.match(block, /result.electronCacheKeySegment/);
+  assert.match(block, /buildCompletedKey/);
+  assert.doesNotMatch(block, /ImageVersion/);
 });
 
 test('exactly one of the two setup-node steps runs, chosen by the version spec', () => {
@@ -216,15 +190,13 @@ test('a floating spec resolves Node before the restore, a pinned spec after', ()
 test('the pinned fast path still lets lookup-only skip Node installation on a hit', () => {
   assert.match(
     stepValue('setup-node', 'if'),
-    /\(inputs\.lookup-only != 'true' \|\| steps\.cache-dependencies\.outputs\.cache-hit != 'true'\)/,
+    /inputs\.lookup-only != 'true'/,
   );
 });
 
 test('lookup-only still prepares and installs on a miss but skips setup on a hit', () => {
-  assert.equal(
-    stepValue('prepare-package-manager', 'if'),
-    "inputs.lookup-only != 'true' || steps.cache-dependencies.outputs.cache-hit != 'true'",
-  );
+  assert.match(stepValue('prepare-package-manager', 'if'), /inputs.lookup-only != 'true'/);
+  assert.match(stepValue('prepare-package-manager', 'if'), /cache-mode == 'restore'/);
   assert.equal(
     stepValue('install-dependencies', 'if'),
     "steps.prepare-package-manager.outputs.shouldInstall == 'true'",
@@ -337,7 +309,7 @@ test('Corepack restores before activation and saves before dependency installati
     assert.match(block.lines.join('\n'), /path: \$\{\{ steps.resolve-corepack-cache.outputs.home \}\}/);
   }
   assert.match(stepValue('resolve-corepack-cache', 'if'), /needsCorepack == 'true'/);
-  assert.match(stepValue('resolve-corepack-cache', 'if'), /inputs.lookup-only != 'true' \|\| steps.cache-dependencies.outputs.cache-hit != 'true'/);
+  assert.match(stepValue('resolve-corepack-cache', 'if'), /inputs.lookup-only != 'true'/);
   assert.match(stepValue('save-corepack', 'if'), /steps.cache-corepack.outputs.cache-hit != 'true'/);
   assert.doesNotMatch(stepValue('save-corepack', 'if'), /always\(\)/);
 });
@@ -377,5 +349,104 @@ test('Corepack options preserve external homes and bypass restore/save outputs',
       assert.equal(exports.COREPACK_HOME, outputs.home);
       assert.equal(exports.CONFIGURE_NODEJS_MANAGED_COREPACK_HOME, outputs.home);
     }
+  }
+});
+
+function condition(id, inputs, outputs) {
+  const expression = stepValue(id, 'if')
+    .replace(/steps\.([\w-]+)\.outputs\.([\w-]+)/g, (_, step, output) => `steps[${JSON.stringify(step)}]?.[${JSON.stringify(output)}]`)
+    .replace(/inputs\.([\w-]+)/g, (_, input) => `inputs[${JSON.stringify(input)}]`);
+  return new Function('inputs', 'steps', `return ${expression}`)(inputs, outputs);
+}
+
+test('completed step conditions enforce warm probe and strict consumer isolation', () => {
+  for (const cacheMode of ['populate', 'restore']) for (const hit of ['true', 'false']) {
+    const inputs = { 'dependency-cache': 'node-modules', 'cache-mode': cacheMode, 'lookup-only': 'false' };
+    const steps = { 'resolve-cache-paths': { nodeVersionIsFloating: 'false' }, 'resolve-package-manager': { needsCorepack: 'true' }, 'cache-dependencies': { 'cache-hit': hit }, 'detect-cache-paths': { exists: 'true' } };
+    const shouldPrepare = cacheMode === 'restore' || hit !== 'true';
+    for (const id of ['setup-node', 'resolve-corepack-cache', 'prepare-package-manager']) assert.equal(condition(id, inputs, steps), shouldPrepare, `${id}/${cacheMode}/${hit}`);
+    assert.equal(condition('save-dependencies', inputs, steps), cacheMode === 'populate' && hit !== 'true');
+    assert.equal(condition('detect-cache-paths', inputs, steps), cacheMode === 'populate' && hit !== 'true');
+  }
+  assert.match(stepBlock('cache-dependencies').lines.join('\n'), /fail-on-cache-miss: .*cache-mode == 'restore'/);
+  assert.match(stepBlock('cache-dependencies').lines.join('\n'), /lookup-only: .*cache-mode == 'populate'/);
+  assert.doesNotMatch(actionYaml, /restore-keys:/);
+});
+
+function scriptFunction(id) {
+  const step = stepBlock(id);
+  const body = inlineScripts().find((block) => block.line >= step.first && block.line < step.last).body;
+  return new (Object.getPrototypeOf(async function () {}).constructor)('core', 'require', 'process', 'exec', body);
+}
+
+test('executed strict prepare rejects misses and major/ABI mismatch without dependency execution', async (t) => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'strict-prepare-'));
+  t.after(() => fs.rmSync(cwd, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(cwd, 'node_modules/.pnpm'), { recursive: true });
+  fs.mkdirSync(path.join(cwd, '.cache/configure-nodejs'), { recursive: true });
+  const run = scriptFunction('prepare-package-manager');
+  for (const scenario of ['miss', 'major', 'abi', 'compatible']) {
+    const env = {
+      GITHUB_ACTION_PATH: path.dirname(actionPath),
+      CONFIGURE_NODEJS_ABSOLUTE_WORKING_DIRECTORY: cwd,
+      CONFIGURE_NODEJS_PACKAGE_MANAGER: 'pnpm',
+      CONFIGURE_NODEJS_PACKAGE_MANAGER_VERSION: '12.7.0',
+      CONFIGURE_NODEJS_PNPM_STORE_PATH: path.join(cwd, '.pnpm-store'),
+      CONFIGURE_NODEJS_NODE_CACHE_KEY_MAJOR: '24',
+      CONFIGURE_NODEJS_INSTALLED_NODE_VERSION: scenario === 'major' ? '22.0.0' : '24.21.0',
+      CONFIGURE_NODEJS_DEPENDENCY_CACHE: 'node-modules',
+      CONFIGURE_NODEJS_CACHE_MODE: 'restore',
+      CONFIGURE_NODEJS_CACHE_HIT: scenario === 'miss' ? 'false' : 'true',
+      CONFIGURE_NODEJS_CACHE_KEY: 'exact-key',
+      CONFIGURE_NODEJS_NEEDS_COREPACK: 'true',
+    };
+    fs.writeFileSync(path.join(cwd, '.cache/configure-nodejs/completed-tree.json'), JSON.stringify({ key: 'exact-key', nodeMajor: 24, nodeABI: scenario === 'abi' ? '999' : '137' }));
+    const calls = [];
+    const outputs = {};
+    const core = { setOutput: (key, value) => { outputs[key] = value; }, exportVariable: () => {}, info: () => {} };
+    const exec = {
+      exec: async (command, args) => { calls.push([command, args]); },
+      getExecOutput: async (command, args) => {
+        calls.push([command, args]);
+        if (command === 'node') return { stdout: '{"major":24,"abi":"137"}' };
+        return { stdout: args[0] === '--version' ? '12.7.0' : path.join(cwd, '.pnpm-store/v11') };
+      },
+    };
+    const result = run(core, createRequire(import.meta.url), { env, platform: process.platform }, exec);
+    if (scenario === 'compatible') {
+      await result;
+      assert.equal(outputs.shouldInstall, 'false');
+      assert.equal(env.PNPM_CONFIG_STORE_DIR, env.npm_config_store_dir);
+    } else await assert.rejects(result, /miss|mismatch|Incompatible/);
+    assert.ok(calls.every(([command, args]) => command !== 'pnpm' || !args.includes('install')));
+    if (scenario === 'miss' || scenario === 'major') assert.deepEqual(calls, []);
+  }
+});
+
+test('executed install failure and lifecycle lock mutation cannot complete population', async (t) => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'failed-population-'));
+  t.after(() => fs.rmSync(cwd, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(cwd, 'package.json'), '{}');
+  const original = 'lockfileVersion: 9\n';
+  const lockfile = path.join(cwd, 'pnpm-lock.yaml');
+  const { installationInputsHash } = await import('../scripts/completed-tree.mjs');
+  const run = scriptFunction('install-dependencies');
+  for (const scenario of ['failure', 'lock-mutation']) {
+    fs.writeFileSync(lockfile, original);
+    const env = {
+      GITHUB_ACTION_PATH: path.dirname(actionPath),
+      CONFIGURE_NODEJS_ABSOLUTE_WORKING_DIRECTORY: cwd,
+      CONFIGURE_NODEJS_DEPENDENCY_CACHE: 'node-modules',
+      CONFIGURE_NODEJS_INSTALL_EXECUTABLE: 'pnpm',
+      CONFIGURE_NODEJS_INSTALL_ARGUMENTS: '["install","--frozen-lockfile"]',
+      CONFIGURE_NODEJS_LOCKFILE_PATH: 'pnpm-lock.yaml',
+      CONFIGURE_NODEJS_LOCKFILE_SHA: crypto.createHash('sha256').update(original).digest('hex'),
+      CONFIGURE_NODEJS_INPUTS_HASH: installationInputsHash({ cwd, lockfilePath: 'pnpm-lock.yaml' }),
+    };
+    await assert.rejects(run({ setOutput: () => {} }, createRequire(import.meta.url), { env }, { exec: async () => {
+      if (scenario === 'failure') throw new Error('Install failed');
+      fs.appendFileSync(lockfile, '# changed');
+    } }), /failed|changed/);
+    assert.equal(fs.existsSync(path.join(cwd, '.cache/configure-nodejs/completed-tree.json')), false);
   }
 });

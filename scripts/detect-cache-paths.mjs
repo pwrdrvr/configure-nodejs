@@ -26,7 +26,12 @@ export function hasCacheableDependencyPath({
   packageManager,
   absolutePrimaryCachePath,
   absoluteWorkingDirectory,
+  dependencyCache = 'default',
 }) {
+  if (dependencyCache === 'node-modules') {
+    return fs.existsSync(path.join(absoluteWorkingDirectory, '.cache/configure-nodejs/completed-tree.json')) &&
+      fs.existsSync(absolutePrimaryCachePath) && containsNodeModules(absoluteWorkingDirectory);
+  }
   if (packageManager === 'pnpm') {
     return fs.existsSync(absolutePrimaryCachePath);
   }

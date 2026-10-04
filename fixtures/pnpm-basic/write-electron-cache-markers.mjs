@@ -1,6 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
+if (process.env.LIFECYCLE_LOG) fs.appendFileSync(process.env.LIFECYCLE_LOG, 'postinstall\n');
+
 const cacheRoots = [
   process.env.npm_config_cache,
   process.env.electron_config_cache,

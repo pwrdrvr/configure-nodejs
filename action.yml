@@ -14,6 +14,15 @@ inputs:
   cache-key-suffix:
     description: "Optional suffix appended to the dependency cache key for namespacing"
     default: ""
+  dependency-cache:
+    description: "Default manager cache, or opt-in completed pnpm node-modules tree"
+    default: "default"
+  cache-mode:
+    description: "Completed-tree mode: populate (probe/install/save) or restore (exact restore, never install)"
+    default: "auto"
+  cache-inputs:
+    description: "Additional installation input files, newline-separated paths relative to working-directory"
+    default: ""
   cache-corepack:
     description: "Cache pinned pnpm/Yarn executables unless COREPACK_HOME is caller-managed"
     default: "true"
@@ -25,6 +34,9 @@ inputs:
     default: "false"
 
 outputs:
+  cache-key:
+    description: "Exact dependency cache key shared by compatible producers and consumers"
+    value: ${{ steps.resolve-dependency-cache-paths.outputs.cacheKey }}
   package-manager:
     description: "Resolved package manager"
     value: ${{ steps.resolve-package-manager.outputs.packageManager }}
@@ -93,6 +105,9 @@ runs:
         CONFIGURE_NODEJS_WORKING_DIRECTORY: ${{ inputs.working-directory }}
         CONFIGURE_NODEJS_CACHE_KEY_SUFFIX: ${{ inputs.cache-key-suffix }}
         CONFIGURE_NODEJS_CACHE_ELECTRON: ${{ inputs.cache-electron }}
+        CONFIGURE_NODEJS_DEPENDENCY_CACHE: ${{ inputs.dependency-cache }}
+        CONFIGURE_NODEJS_CACHE_MODE: ${{ inputs.cache-mode }}
+        CONFIGURE_NODEJS_LOOKUP_ONLY: ${{ inputs.lookup-only }}
         CONFIGURE_NODEJS_NODE_VERSION: ${{ inputs.node-version }}
       with:
         script: |
@@ -116,6 +131,15 @@ runs:
             workingDirectory: process.env.CONFIGURE_NODEJS_WORKING_DIRECTORY,
             cacheKeySuffix: process.env.CONFIGURE_NODEJS_CACHE_KEY_SUFFIX,
             cacheElectron: process.env.CONFIGURE_NODEJS_CACHE_ELECTRON,
+          });
+
+          const { validateCacheMode } = await import(pathToFileURL(
+            path.join(process.env.GITHUB_ACTION_PATH, 'scripts', 'completed-tree.mjs'),
+          ).href);
+          validateCacheMode({
+            dependencyCache: process.env.CONFIGURE_NODEJS_DEPENDENCY_CACHE,
+            cacheMode: process.env.CONFIGURE_NODEJS_CACHE_MODE,
+            lookupOnly: process.env.CONFIGURE_NODEJS_LOOKUP_ONLY,
           });
 
           core.setOutput('absoluteWorkingDirectory', result.absoluteWorkingDirectory);
@@ -199,6 +223,16 @@ runs:
       id: resolve-dependency-cache-paths
       uses: actions/github-script@v8
       env:
+        CONFIGURE_NODEJS_DEPENDENCY_CACHE: ${{ inputs.dependency-cache }}
+        CONFIGURE_NODEJS_CACHE_MODE: ${{ inputs.cache-mode }}
+        CONFIGURE_NODEJS_LOOKUP_ONLY: ${{ inputs.lookup-only }}
+        CONFIGURE_NODEJS_CACHE_INPUTS: ${{ inputs.cache-inputs }}
+        CONFIGURE_NODEJS_MANAGER_VERSION: ${{ steps.resolve-package-manager.outputs.packageManagerVersion }}
+        CONFIGURE_NODEJS_MANAGER_KEY: ${{ steps.resolve-package-manager.outputs.managerCacheKey }}
+        CONFIGURE_NODEJS_LOCKFILE_PATH: ${{ steps.resolve-package-manager.outputs.lockfilePath }}
+        CONFIGURE_NODEJS_LOCKFILE_SHA: ${{ steps.resolve-package-manager.outputs.lockfileSha }}
+        CONFIGURE_NODEJS_RUNNER_OS: ${{ runner.os }}
+        CONFIGURE_NODEJS_RUNNER_ARCH: ${{ runner.arch }}
         CONFIGURE_NODEJS_WORKING_DIRECTORY: ${{ inputs.working-directory }}
         CONFIGURE_NODEJS_CACHE_KEY_SUFFIX: ${{ inputs.cache-key-suffix }}
         CONFIGURE_NODEJS_CACHE_ELECTRON: ${{ inputs.cache-electron }}
@@ -253,8 +287,44 @@ runs:
             cacheKeySuffix: process.env.CONFIGURE_NODEJS_CACHE_KEY_SUFFIX,
             cacheElectron: process.env.CONFIGURE_NODEJS_CACHE_ELECTRON,
             packageManager: process.env.CONFIGURE_NODEJS_PACKAGE_MANAGER,
+            dependencyCache: process.env.CONFIGURE_NODEJS_DEPENDENCY_CACHE,
           });
 
+          const { validateCacheMode, installationInputsHash, actionSourceHash, buildCompletedKey } = await import(pathToFileURL(
+            path.join(process.env.GITHUB_ACTION_PATH, 'scripts', 'completed-tree.mjs'),
+          ).href);
+          validateCacheMode({
+            dependencyCache: process.env.CONFIGURE_NODEJS_DEPENDENCY_CACHE,
+            cacheMode: process.env.CONFIGURE_NODEJS_CACHE_MODE,
+            lookupOnly: process.env.CONFIGURE_NODEJS_LOOKUP_ONLY,
+            packageManager: process.env.CONFIGURE_NODEJS_PACKAGE_MANAGER,
+            packageManagerVersion: process.env.CONFIGURE_NODEJS_MANAGER_VERSION,
+          });
+          let cacheKey;
+          if (process.env.CONFIGURE_NODEJS_DEPENDENCY_CACHE === 'node-modules') {
+            const inputsHash = installationInputsHash({
+              cwd: result.absoluteWorkingDirectory,
+              lockfilePath: process.env.CONFIGURE_NODEJS_LOCKFILE_PATH,
+              cacheInputs: process.env.CONFIGURE_NODEJS_CACHE_INPUTS,
+            });
+            core.setOutput('inputsHash', inputsHash);
+            cacheKey = buildCompletedKey({
+              nodeMajor: nodeVersion.nodeMajor,
+              packageManagerVersion: process.env.CONFIGURE_NODEJS_MANAGER_VERSION,
+              os: process.env.CONFIGURE_NODEJS_RUNNER_OS,
+              arch: process.env.CONFIGURE_NODEJS_RUNNER_ARCH,
+              imageOS: process.env.ImageOS ?? '',
+              workingDirectory: result.workingDirectory,
+              inputsHash,
+              actionRevision: actionSourceHash(process.env.GITHUB_ACTION_PATH),
+              cacheKeySuffix: process.env.CONFIGURE_NODEJS_CACHE_KEY_SUFFIX,
+              cacheElectron: result.cacheElectron,
+            });
+          } else {
+            cacheKey = `${result.cacheKeyPrefix}-${nodeVersion.nodeCacheKeySegment}-${process.env.CONFIGURE_NODEJS_RUNNER_OS}-${process.env.CONFIGURE_NODEJS_RUNNER_ARCH}-${result.workingDirectoryKey}-${process.env.CONFIGURE_NODEJS_MANAGER_KEY}-${process.env.CONFIGURE_NODEJS_LOCKFILE_SHA}${result.electronCacheKeySegment}${result.cacheKeySuffixSegment}`;
+          }
+          core.setOutput('cacheKey', cacheKey);
+          core.setOutput('absolutePnpmStorePath', path.join(result.absoluteWorkingDirectory, '.pnpm-store'));
           core.setOutput('cachePaths', result.cachePaths.join('\n'));
           core.setOutput('primaryCachePath', result.primaryCachePath);
           core.setOutput('absolutePrimaryCachePath', result.absolutePrimaryCachePath);
@@ -272,8 +342,20 @@ runs:
       uses: actions/cache/restore@v5
       with:
         path: ${{ steps.resolve-dependency-cache-paths.outputs.cachePaths }}
-        key: ${{ steps.resolve-dependency-cache-paths.outputs.cacheKeyPrefix }}-${{ steps.resolve-dependency-cache-paths.outputs.nodeCacheKeySegment }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.resolve-cache-paths.outputs.workingDirectoryKey }}-${{ steps.resolve-package-manager.outputs.managerCacheKey }}-${{ steps.resolve-package-manager.outputs.lockfileSha }}${{ steps.resolve-dependency-cache-paths.outputs.electronCacheKeySegment }}${{ steps.resolve-cache-paths.outputs.cacheKeySuffixSegment }}
-        lookup-only: ${{ inputs.lookup-only }}
+        key: ${{ steps.resolve-dependency-cache-paths.outputs.cacheKey }}
+        lookup-only: ${{ inputs.lookup-only == 'true' || (inputs.dependency-cache == 'node-modules' && inputs.cache-mode == 'populate') }}
+        fail-on-cache-miss: ${{ inputs.dependency-cache == 'node-modules' && inputs.cache-mode == 'restore' }}
+
+    - name: Require an exact completed consumer hit
+      if: inputs.dependency-cache == 'node-modules' && inputs.cache-mode == 'restore'
+      uses: actions/github-script@v8
+      env:
+        CONFIGURE_NODEJS_CACHE_HIT: ${{ steps.cache-dependencies.outputs.cache-hit }}
+      with:
+        script: |
+          if (process.env.CONFIGURE_NODEJS_CACHE_HIT !== 'true') {
+            throw new Error('Exact completed dependency cache miss; strict restore forbids fallback or installation.');
+          }
 
     - name: Record cache restore timing
       id: cache-restore-timing
@@ -293,14 +375,14 @@ runs:
     - name: Setup Node.js
       id: setup-node
       uses: actions/setup-node@v6
-      if: steps.resolve-cache-paths.outputs.nodeVersionIsFloating != 'true' && (inputs.lookup-only != 'true' || steps.cache-dependencies.outputs.cache-hit != 'true')
+      if: steps.resolve-cache-paths.outputs.nodeVersionIsFloating != 'true' && ((inputs.dependency-cache == 'node-modules' && inputs.cache-mode == 'restore') || (inputs.dependency-cache != 'node-modules' && inputs.lookup-only != 'true') || steps.cache-dependencies.outputs.cache-hit != 'true')
       with:
         node-version: ${{ inputs.node-version }}
         package-manager-cache: false
 
     - name: Resolve Corepack cache
       id: resolve-corepack-cache
-      if: steps.resolve-package-manager.outputs.needsCorepack == 'true' && (inputs.lookup-only != 'true' || steps.cache-dependencies.outputs.cache-hit != 'true')
+      if: steps.resolve-package-manager.outputs.needsCorepack == 'true' && ((inputs.dependency-cache == 'node-modules' && inputs.cache-mode == 'restore') || (inputs.dependency-cache != 'node-modules' && inputs.lookup-only != 'true') || steps.cache-dependencies.outputs.cache-hit != 'true')
       uses: actions/github-script@v8
       env:
         CONFIGURE_NODEJS_CACHE_COREPACK: ${{ inputs.cache-corepack }}
@@ -343,9 +425,13 @@ runs:
 
     - name: Prepare package manager
       id: prepare-package-manager
-      if: inputs.lookup-only != 'true' || steps.cache-dependencies.outputs.cache-hit != 'true'
+      if: ((inputs.dependency-cache == 'node-modules' && inputs.cache-mode == 'restore') || (inputs.dependency-cache != 'node-modules' && inputs.lookup-only != 'true') || steps.cache-dependencies.outputs.cache-hit != 'true')
       uses: actions/github-script@v8
       env:
+        CONFIGURE_NODEJS_DEPENDENCY_CACHE: ${{ inputs.dependency-cache }}
+        CONFIGURE_NODEJS_CACHE_MODE: ${{ inputs.cache-mode }}
+        CONFIGURE_NODEJS_CACHE_KEY: ${{ steps.resolve-dependency-cache-paths.outputs.cacheKey }}
+        CONFIGURE_NODEJS_PNPM_STORE_PATH: ${{ steps.resolve-dependency-cache-paths.outputs.absolutePnpmStorePath }}
         CONFIGURE_NODEJS_COREPACK_CACHE_STARTED_AT: ${{ steps.resolve-corepack-cache.outputs.startedAt }}
         CONFIGURE_NODEJS_SETUP_STARTED_AT: ${{ steps.cache-restore-timing.outputs.setupNodeStartedAt }}
         CONFIGURE_NODEJS_ABSOLUTE_WORKING_DIRECTORY: ${{ steps.resolve-cache-paths.outputs.absoluteWorkingDirectory }}
@@ -371,7 +457,7 @@ runs:
           const manager = process.env.CONFIGURE_NODEJS_PACKAGE_MANAGER;
           const version = process.env.CONFIGURE_NODEJS_PACKAGE_MANAGER_VERSION;
           const expectedStorePath =
-            process.env.CONFIGURE_NODEJS_ABSOLUTE_PRIMARY_CACHE_PATH;
+            process.env.CONFIGURE_NODEJS_PNPM_STORE_PATH;
           const setupStartedAt = Number.parseInt(
             process.env.CONFIGURE_NODEJS_SETUP_STARTED_AT,
             10,
@@ -408,7 +494,7 @@ runs:
             installedNodeVersion:
               process.env.CONFIGURE_NODEJS_INSTALLED_NODE_VERSION,
           });
-          if (mismatch) {
+          if (mismatch && process.env.CONFIGURE_NODEJS_DEPENDENCY_CACHE !== 'node-modules') {
             core.warning(
               `Node.js version "${process.env.CONFIGURE_NODEJS_NODE_VERSION}" was treated as pinned to major ${mismatch.cacheKeyNodeMajor}, but actions/setup-node installed major ${mismatch.installedMajor}. Discarding the restored dependencies and reinstalling so native addons match the running ABI. The cache entry cannot be corrected under a key that already exists, so every run will reinstall until the lockfile changes -- please report this version spec to pwrdrvr/configure-nodejs so the classifier can be fixed.`,
             );
@@ -418,6 +504,7 @@ runs:
               packageManager: manager,
               cacheHit,
               mismatch,
+              dependencyCache: process.env.CONFIGURE_NODEJS_DEPENDENCY_CACHE,
             })
           ) {
             // For npm and Yarn the primary cache path is node_modules itself.
@@ -434,6 +521,8 @@ runs:
                 cacheHit,
                 lookupOnly,
                 mismatch,
+                dependencyCache: process.env.CONFIGURE_NODEJS_DEPENDENCY_CACHE,
+                cacheMode: process.env.CONFIGURE_NODEJS_CACHE_MODE,
               }),
             ),
           );
@@ -485,6 +574,8 @@ runs:
 
           if (manager === 'pnpm') {
             const storeDiscoveryStartedAt = Date.now();
+            process.env.PNPM_CONFIG_STORE_DIR = expectedStorePath;
+            core.exportVariable('PNPM_CONFIG_STORE_DIR', expectedStorePath);
             process.env.npm_config_store_dir = expectedStorePath;
             core.exportVariable('npm_config_store_dir', expectedStorePath);
 
@@ -519,6 +610,20 @@ runs:
             core.setOutput('pnpmStorePath', discoveredStorePath);
             storeDiscoveryDurationMs = Date.now() - storeDiscoveryStartedAt;
           }
+          if (process.env.CONFIGURE_NODEJS_DEPENDENCY_CACHE === 'node-modules') {
+            const runtime = await exec.getExecOutput('node', ['-p', 'JSON.stringify({major: Number(process.versions.node.split(".")[0]), abi: process.versions.modules})'], { cwd, silent: true });
+            const { major, abi } = JSON.parse(runtime.stdout.trim());
+            if (major !== Number(process.env.CONFIGURE_NODEJS_NODE_CACHE_KEY_MAJOR)) {
+              throw new Error('Completed dependency Node major mismatch; installation/repair is forbidden.');
+            }
+            core.setOutput('nodeABI', abi);
+            if (cacheHit) {
+              const { verifyCompletedTree } = await import(pathToFileURL(
+                path.join(process.env.GITHUB_ACTION_PATH, 'scripts', 'completed-tree.mjs'),
+              ).href);
+              verifyCompletedTree({ cwd, key: process.env.CONFIGURE_NODEJS_CACHE_KEY, nodeMajor: major, nodeABI: abi });
+            }
+          }
           core.setOutput('activationDurationMs', activationDurationMs);
           core.setOutput('storeDiscoveryDurationMs', storeDiscoveryDurationMs);
 
@@ -536,6 +641,14 @@ runs:
       if: steps.prepare-package-manager.outputs.shouldInstall == 'true'
       uses: actions/github-script@v8
       env:
+        CONFIGURE_NODEJS_DEPENDENCY_CACHE: ${{ inputs.dependency-cache }}
+        CONFIGURE_NODEJS_CACHE_KEY: ${{ steps.resolve-dependency-cache-paths.outputs.cacheKey }}
+        CONFIGURE_NODEJS_NODE_MAJOR: ${{ steps.resolve-dependency-cache-paths.outputs.nodeMajor }}
+        CONFIGURE_NODEJS_NODE_ABI: ${{ steps.prepare-package-manager.outputs.nodeABI }}
+        CONFIGURE_NODEJS_LOCKFILE_PATH: ${{ steps.resolve-package-manager.outputs.lockfilePath }}
+        CONFIGURE_NODEJS_LOCKFILE_SHA: ${{ steps.resolve-package-manager.outputs.lockfileSha }}
+        CONFIGURE_NODEJS_INPUTS_HASH: ${{ steps.resolve-dependency-cache-paths.outputs.inputsHash }}
+        CONFIGURE_NODEJS_CACHE_INPUTS: ${{ inputs.cache-inputs }}
         CONFIGURE_NODEJS_ABSOLUTE_WORKING_DIRECTORY: ${{ steps.resolve-cache-paths.outputs.absoluteWorkingDirectory }}
         CONFIGURE_NODEJS_INSTALL_EXECUTABLE: ${{ steps.resolve-package-manager.outputs.installExecutable }}
         CONFIGURE_NODEJS_INSTALL_ARGUMENTS: ${{ steps.resolve-package-manager.outputs.installArguments }}
@@ -547,13 +660,31 @@ runs:
           await exec.exec(executable, args, {
             cwd: process.env.CONFIGURE_NODEJS_ABSOLUTE_WORKING_DIRECTORY,
           });
+          if (process.env.CONFIGURE_NODEJS_DEPENDENCY_CACHE === 'node-modules') {
+            const path = require('path');
+            const { pathToFileURL } = require('url');
+            const { completePopulation } = await import(pathToFileURL(
+              path.join(process.env.GITHUB_ACTION_PATH, 'scripts', 'completed-tree.mjs'),
+            ).href);
+            completePopulation({
+              cwd: process.env.CONFIGURE_NODEJS_ABSOLUTE_WORKING_DIRECTORY,
+              key: process.env.CONFIGURE_NODEJS_CACHE_KEY,
+              nodeMajor: process.env.CONFIGURE_NODEJS_NODE_MAJOR,
+              nodeABI: process.env.CONFIGURE_NODEJS_NODE_ABI,
+              lockfilePath: process.env.CONFIGURE_NODEJS_LOCKFILE_PATH,
+              lockfileSha: process.env.CONFIGURE_NODEJS_LOCKFILE_SHA,
+              inputsHash: process.env.CONFIGURE_NODEJS_INPUTS_HASH,
+              cacheInputs: process.env.CONFIGURE_NODEJS_CACHE_INPUTS,
+            });
+          }
           core.setOutput('durationMs', Date.now() - startedAt);
 
     - name: Detect cacheable dependency paths
       id: detect-cache-paths
-      if: steps.cache-dependencies.outputs.cache-hit != 'true'
+      if: steps.cache-dependencies.outputs.cache-hit != 'true' && inputs.cache-mode != 'restore'
       uses: actions/github-script@v8
       env:
+        CONFIGURE_NODEJS_DEPENDENCY_CACHE: ${{ inputs.dependency-cache }}
         CONFIGURE_NODEJS_PACKAGE_MANAGER: ${{ steps.resolve-package-manager.outputs.packageManager }}
         CONFIGURE_NODEJS_ABSOLUTE_PRIMARY_CACHE_PATH: ${{ steps.resolve-dependency-cache-paths.outputs.absolutePrimaryCachePath }}
         CONFIGURE_NODEJS_ABSOLUTE_WORKING_DIRECTORY: ${{ steps.resolve-cache-paths.outputs.absoluteWorkingDirectory }}
@@ -587,6 +718,7 @@ runs:
             });
           }
           const exists = hasCacheableDependencyPath({
+            dependencyCache: process.env.CONFIGURE_NODEJS_DEPENDENCY_CACHE,
             packageManager: process.env.CONFIGURE_NODEJS_PACKAGE_MANAGER,
             absolutePrimaryCachePath:
               process.env.CONFIGURE_NODEJS_ABSOLUTE_PRIMARY_CACHE_PATH,
@@ -598,11 +730,35 @@ runs:
           core.setOutput('cacheSaveStartedAt', Date.now());
 
     - name: Save dependencies to cache
-      if: steps.cache-dependencies.outputs.cache-hit != 'true' && steps.detect-cache-paths.outputs.exists == 'true'
+      id: save-dependencies
+      if: steps.cache-dependencies.outputs.cache-hit != 'true' && inputs.cache-mode != 'restore' && steps.detect-cache-paths.outputs.exists == 'true'
       uses: actions/cache/save@v5
       with:
         path: ${{ steps.resolve-dependency-cache-paths.outputs.cachePaths }}
-        key: ${{ steps.resolve-dependency-cache-paths.outputs.cacheKeyPrefix }}-${{ steps.resolve-dependency-cache-paths.outputs.nodeCacheKeySegment }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.resolve-cache-paths.outputs.workingDirectoryKey }}-${{ steps.resolve-package-manager.outputs.managerCacheKey }}-${{ steps.resolve-package-manager.outputs.lockfileSha }}${{ steps.resolve-dependency-cache-paths.outputs.electronCacheKeySegment }}${{ steps.resolve-cache-paths.outputs.cacheKeySuffixSegment }}
+        key: ${{ steps.resolve-dependency-cache-paths.outputs.cacheKey }}
+
+    # cache/save reports some service failures as warnings. A cold completed
+    # producer must not report success unless the consumer's exact entry exists.
+    - name: Confirm completed dependency cache was saved
+      id: confirm-completed-save
+      if: inputs.dependency-cache == 'node-modules' && inputs.cache-mode == 'populate' && steps.cache-dependencies.outputs.cache-hit != 'true'
+      uses: actions/cache/restore@v5
+      with:
+        path: ${{ steps.resolve-dependency-cache-paths.outputs.cachePaths }}
+        key: ${{ steps.resolve-dependency-cache-paths.outputs.cacheKey }}
+        lookup-only: true
+        fail-on-cache-miss: true
+
+    - name: Require exact completed save confirmation
+      if: inputs.dependency-cache == 'node-modules' && inputs.cache-mode == 'populate' && steps.cache-dependencies.outputs.cache-hit != 'true'
+      uses: actions/github-script@v8
+      env:
+        CONFIGURE_NODEJS_CACHE_HIT: ${{ steps.confirm-completed-save.outputs.cache-hit }}
+      with:
+        script: |
+          if (process.env.CONFIGURE_NODEJS_CACHE_HIT !== 'true') {
+            throw new Error('Completed dependency cache was not saved under its exact key.');
+          }
 
     - name: Report phase timings
       id: finalize-timings

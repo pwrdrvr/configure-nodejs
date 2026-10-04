@@ -221,8 +221,18 @@ export function buildCachePaths(
   workingDirectory,
   packageManager = '',
   electronCachePaths = [],
+  dependencyCache = 'default',
 ) {
   const base = workingDirectory === '.' ? '' : `${workingDirectory}/`;
+
+  if (dependencyCache === 'node-modules') {
+    return [
+      `${base}node_modules`,
+      `${base}**/node_modules`,
+      `${base}.cache/configure-nodejs/completed-tree.json`,
+      ...electronCachePaths,
+    ];
+  }
 
   if (packageManager === 'pnpm') {
     return [`${base}.pnpm-store`, ...electronCachePaths];
@@ -237,12 +247,13 @@ export function buildCachePaths(
   ];
 }
 
-export function buildPrimaryCachePath(workingDirectory, packageManager = '') {
+export function buildPrimaryCachePath(workingDirectory, packageManager = '', dependencyCache = 'default') {
   const base = workingDirectory === '.' ? '' : `${workingDirectory}/`;
-  return packageManager === 'pnpm' ? `${base}.pnpm-store` : `${base}node_modules`;
+  return packageManager === 'pnpm' && dependencyCache !== 'node-modules' ? `${base}.pnpm-store` : `${base}node_modules`;
 }
 
-export function buildCacheKeyPrefix(packageManager = '') {
+export function buildCacheKeyPrefix(packageManager = '', dependencyCache = 'default') {
+  if (dependencyCache === 'node-modules') return 'completed-node-modules-v1';
   return packageManager === 'pnpm' ? 'pnpm-store' : 'node-modules';
 }
 
@@ -252,6 +263,7 @@ export function buildResult({
   cacheKeySuffix = '',
   cacheElectron = 'false',
   packageManager = '',
+  dependencyCache = 'default',
 }) {
   const resolvedWorkingDirectory = resolveWorkingDirectory(cwd, workingDirectory);
   const normalizedCacheKeySuffix = normalizeCacheKeySuffix(cacheKeySuffix);
@@ -288,6 +300,7 @@ export function buildResult({
   const primaryCachePath = buildPrimaryCachePath(
     resolvedWorkingDirectory.workingDirectory,
     normalizedPackageManager,
+    dependencyCache,
   );
 
   return {
@@ -300,6 +313,7 @@ export function buildResult({
       resolvedWorkingDirectory.workingDirectory,
       normalizedPackageManager,
       electronCachePaths,
+      dependencyCache,
     ),
     cacheElectron: normalizedCacheElectron,
     electronCachePaths,
@@ -310,7 +324,7 @@ export function buildResult({
       : '',
     primaryCachePath,
     absolutePrimaryCachePath: path.resolve(cwd, primaryCachePath),
-    cacheKeyPrefix: buildCacheKeyPrefix(normalizedPackageManager),
+    cacheKeyPrefix: buildCacheKeyPrefix(normalizedPackageManager, dependencyCache),
     cacheKeySuffix: normalizedCacheKeySuffix,
     cacheKeySuffixSegment:
       normalizedCacheKeySuffix === '' ? '' : `-${normalizedCacheKeySuffix}`,

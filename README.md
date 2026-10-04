@@ -80,9 +80,9 @@ It is a warning, not a failure, so nobody notices. You pay for the redundant upl
 </details>
 
 <details>
-<summary><b>Failure mode: pnpm's <code>node_modules</code> does not survive a tarball round trip</b> — which is why this action caches the store instead.</summary>
+<summary><b>Default pnpm store caching and completed trees</b></summary>
 
-The default instinct is to cache `node_modules`. For pnpm that is a trap of a different kind: pnpm's `node_modules` is a farm of symlinks into a content-addressed store, and archiving and re-extracting it produces a tree that is subtly, intermittently broken.
+pnpm uses a virtual store and symlinks within `node_modules`. A completed tree can be restored without installing when those links and native binaries remain compatible with the consumer. The default store cache reconstructs the tree on each consumer; the opt-in completed-tree modes below require compatible paths and platforms.
 
 `configure-nodejs` caches the **store** for pnpm and re-runs `pnpm install --frozen-lockfile` against it. The install is cheap because nothing has to be downloaded, and the resulting link farm is real rather than reconstructed. For npm and Yarn it caches `node_modules` directly and skips install entirely on a hit.
 
@@ -229,6 +229,9 @@ By the time `Test` ran the cache was already written. If `Test` had failed, the 
 | `package-manager` | `""` | Optional override for `npm`, `pnpm`, or `yarn`; by default the action follows the package manager inferred from `package.json` and the lockfile present |
 | `working-directory` | `"."` | Repository-relative directory containing `package.json` and the lockfile |
 | `cache-key-suffix` | `""` | Optional suffix appended to the dependency cache key when you want to namespace cache entries |
+| `dependency-cache` | `"default"` | Set `node-modules` to opt into completed pnpm trees with an exact package-manager pin |
+| `cache-mode` | `"auto"` | Required `populate` or `restore` for completed trees; default manager caches use `auto` |
+| `cache-inputs` | `""` | Additional installation input files, one path per line, relative to `working-directory` |
 | `cache-corepack` | `"true"` | Cache pinned pnpm/Yarn executables. Set to `"false"` to disable the separate Corepack cache. Caller-supplied `COREPACK_HOME` is preserved and left caller-managed |
 | `cache-electron` | `"false"` | When `true`, caches the workspace-local Electron runtime download cache and native-addon prebuild download cache, and points lifecycle scripts at them. See [Electron lifecycle download caches](#electron-lifecycle-download-caches) |
 | `lookup-only` | `"false"` | When `true`, only checks whether the cache exists and skips downloading it; on a cache hit the action also skips `setup-node` and install-time package-manager setup. See [the gate job pattern](#the-fix-a-gate-job-that-only-primes-the-cache) |
@@ -245,7 +248,7 @@ The major is what matters because `NODE_MODULE_VERSION` — the ABI every compil
 | Yarn | `node_modules` | install skipped entirely |
 | pnpm | workspace-local `.pnpm-store` | `pnpm install --frozen-lockfile --store-dir .pnpm-store` re-runs against the warm store |
 
-For pnpm, `cache-hit` means *the store cache was found*. It does not mean `node_modules` was restored. Cache paths and keys are scoped to `working-directory`, so subdirectory apps in a monorepo stay isolated. The action exports `npm_config_store_dir` for later workflow steps so follow-up pnpm commands use the same store.
+For pnpm, `cache-hit` means *the store cache was found*. It does not mean `node_modules` was restored. Cache paths and keys are scoped to `working-directory`, so subdirectory apps in a monorepo stay isolated. The action exports both `PNPM_CONFIG_STORE_DIR` (including native pnpm 12) and `npm_config_store_dir` for later workflow steps so follow-up pnpm commands use the same store.
 
 By default, pinned pnpm and Yarn executables are cached separately in an action-managed `COREPACK_HOME` under the runner's temporary directory. This cache is keyed by OS, architecture, and the full package-manager version (including any integrity hash), independently of the lockfile, working directory, and dependency cache suffix. It restores before activation and saves immediately after successful preparation. Corepack still enables the shims and verifies the version on a cache hit, but can reuse the downloaded executable without fetching it again.
 
@@ -253,6 +256,58 @@ Set `cache-corepack: "false"` to disable this cache without changing package-man
 
 Unpinned versions, ranges, and URL selectors do not use this separate cache. A `lookup-only` dependency cache hit skips Corepack setup and restore as before. The existing `cache-hit` output and cache restore/save timing outputs describe the dependency cache; Corepack cache transfer time is included only in the total duration.
 
+
+### Completed pnpm trees (opt-in)
+
+Use `dependency-cache: node-modules` with explicit `cache-mode: populate` in a producer and `cache-mode: restore` in consumers. This interface currently supports pnpm with an exact `package.json#packageManager` pin (including its integrity hash). Existing npm, Yarn, and pnpm default caches are unchanged. Do not combine these modes with `lookup-only`.
+
+| Mode | Exact hit | Exact miss |
+| --- | --- | --- |
+| `populate` | Probe only; no tree download, installation, lifecycle scripts, or save | Set up Node/Corepack, frozen-install, verify original lock bytes and installation inputs, write compatibility metadata, save inline |
+| `restore` | Set up Node/Corepack and restore the completed tree; no dependency install, lifecycle scripts, or dependency save | Fail immediately; no fallback or installation |
+
+The `cache-key` output is shared by both modes; the operational role never enters the key. The distinct `completed-node-modules-v1` namespace includes Node major and exact pnpm pin. A SHA256 policy digest includes runner OS/architecture, stable `ImageOS`, normalized working directory, complete lock bytes (including every YAML document), all workspace manifests and npm/workspace config, optional `cache-inputs` files, action implementation revision, Electron cache choice, and the raw `cache-key-suffix`. `ImageVersion` is excluded. The implementation revision hashes `action.yml` and all shipped `.mjs` scripts; include the reviewed immutable action SHA in `cache-key-suffix` as well to bind caches to the exact reviewed revision. Prefix restore keys and store fallback are never used.
+
+`cache-inputs` accepts explicit files, not globs. Include patches, hooks, certificates, local dependency sources, and other inputs that affect installation. Files outside the selected working directory are rejected. Installation environment, secrets, and policies that are not files must be represented by a caller policy suffix. Populate and restore must use the same inputs, source commit, runner image family, and checkout layout.
+
+Completed archives contain workspace `node_modules` trees, their pnpm virtual stores and links, and a compatibility marker. They exclude the pnpm download store. Restores verify the recorded Node major and actual `NODE_MODULE_VERSION` from the selected Node executable; missing or incompatible metadata fails without repair. Different Node majors yield distinct keys; even a same-major ABI mismatch fails. Failed installs, changed lockfiles/inputs, and incompatible trees are not saved. Corepack may prepare/cache the pinned package-manager executable independently of project dependencies.
+
+Use portable `packageImportMethod: auto`. Relative pnpm links and allowed native tooling are exercised on Linux, macOS, and Windows. Absolute links, linked packages outside the checkout, platform-specific native artifacts, and different filesystem layouts may require additional policy namespacing or a fresh population. These CI settings do not change local development's shared store.
+
+```yaml
+jobs:
+  install-deps:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+      - uses: pwrdrvr/configure-nodejs@v1 # Pin the reviewed immutable SHA in production.
+        with:
+          node-version: '24'
+          dependency-cache: node-modules
+          cache-mode: populate
+          cache-key-suffix: my-project-reviewed-action-sha-policy-v1
+
+  test:
+    needs: install-deps
+    runs-on: ubuntu-latest
+    env:
+      PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN: 'false'
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+      - uses: pwrdrvr/configure-nodejs@v1 # Use the same reviewed immutable SHA.
+        with:
+          node-version: '24'
+          dependency-cache: node-modules
+          cache-mode: restore
+          cache-key-suffix: my-project-reviewed-action-sha-policy-v1
+      - run: pnpm run test
+```
+
+Strict mode governs this action's dependency operations. For later `pnpm run` commands, callers must set `PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN: 'false'` in consumer jobs to prevent pnpm 12 from implicitly reinstalling after changes such as `npm version`. Producers retain normal verification. Registry/token setup remains caller-owned; pass publication credentials only to the publish step.
 
 ### Electron lifecycle download caches
 
@@ -298,7 +353,7 @@ jobs:
 On the first opt-in miss, the `lookup-only` gate still sets up Node.js, installs dependencies, populates both lifecycle caches, and saves them with the package-manager cache. On a hit, the gate only performs the lookup. Its downstream jobs restore all three cache components before postinstall runs. Repeat the opt-in on every OS/architecture-specific gate and consumer that should share this behavior.
 
 <details>
-<summary><b>All 19 outputs</b> — <code>package-manager</code>, <code>lockfile-sha</code>, <code>cache-hit</code>, <code>node-major</code>, <code>pnpm-store-path</code>, <code>install-command</code>, and per-phase timings in milliseconds.</summary>
+<summary><b>All 20 outputs</b> — <code>package-manager</code>, <code>lockfile-sha</code>, <code>cache-hit</code>, <code>node-major</code>, <code>pnpm-store-path</code>, <code>install-command</code>, and per-phase timings in milliseconds.</summary>
 
 | Output | Description |
 | --- | --- |
@@ -311,6 +366,7 @@ On the first opt-in miss, the `lookup-only` gate still sets up Node.js, installs
 | `install-command` | Install command used when dependency installation runs |
 | `working-directory` | Normalized working directory |
 | `working-directory-key` | Cache-key-safe working-directory identifier |
+| `cache-key` | Exact dependency key; producers and compatible consumers must agree |
 | `cache-hit` | `true` when the dependency cache entry exists for the computed key |
 | `node-major` | Node.js major version the dependency cache key was built from |
 | `pnpm-store-path` | Absolute workspace-local pnpm store path when pnpm setup runs |
