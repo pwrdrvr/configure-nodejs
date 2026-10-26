@@ -32,6 +32,12 @@ inputs:
   lookup-only:
     description: "If true, only checks if the dependency cache exists and skips download. Does not change save cache behavior"
     default: "false"
+  persistent-store-dir:
+    description: "Absolute path outside the workspace that keeps the pnpm store, Corepack home, and Electron caches between jobs on a persistent self-hosted runner; empty disables"
+    default: ""
+  persistent-store-max-age-days:
+    description: "Days a seeded persistent store stays warm before it is dropped and re-seeded from the dependency cache"
+    default: "14"
 
 outputs:
   cache-key:
@@ -57,7 +63,7 @@ outputs:
     value: ${{ steps.resolve-package-manager.outputs.lockfileSha }}
   install-command:
     description: "Install command used when dependency installation runs"
-    value: ${{ steps.resolve-package-manager.outputs.installCommand }}
+    value: ${{ steps.persistent-store.outputs.installCommand || steps.resolve-package-manager.outputs.installCommand }}
   working-directory:
     description: "Normalized repository-relative working directory"
     value: ${{ steps.resolve-cache-paths.outputs.workingDirectory }}
@@ -72,7 +78,10 @@ outputs:
     value: ${{ steps.resolve-dependency-cache-paths.outputs.nodeMajor }}
   pnpm-store-path:
     description: "Absolute pnpm store path when pnpm setup runs"
-    value: ${{ steps.prepare-package-manager.outputs.pnpmStorePath }}
+    value: ${{ steps.seed-persistent-store.outputs.pnpmStorePath || steps.prepare-package-manager.outputs.pnpmStorePath }}
+  persistent-store-warm:
+    description: "Whether a warm persistent pnpm store let the dependency cache restore be skipped"
+    value: ${{ steps.persistent-store.outputs.warm }}
   cache-restore-duration-ms:
     description: "Measured cache restore phase duration in milliseconds"
     value: ${{ steps.finalize-timings.outputs.cacheRestoreDurationMs }}
@@ -194,6 +203,110 @@ runs:
           core.setOutput('installArguments', JSON.stringify(result.installArguments));
           core.setOutput('needsCorepack', result.needsCorepack);
           core.setOutput('setupNodeStartedAt', Date.now());
+
+    # Persistent self-hosted runners keep their disk between jobs, but checkout
+    # cleans the workspace, so the in-workspace store is deleted every job. With
+    # persistent-store-dir set, the store lives outside the workspace instead. A
+    # warm store skips the dependency cache restore; a cold one (missing,
+    # unreadable, future-dated, or expired marker) is dropped here and re-seeded
+    # after the normal restore and install. See scripts/persistent-store.mjs.
+    - name: Check persistent pnpm store
+      id: persistent-store
+      uses: actions/github-script@v8
+      env:
+        CONFIGURE_NODEJS_PERSISTENT_STORE_DIR: ${{ inputs.persistent-store-dir }}
+        CONFIGURE_NODEJS_PERSISTENT_STORE_MAX_AGE_DAYS: ${{ inputs.persistent-store-max-age-days }}
+        CONFIGURE_NODEJS_DEPENDENCY_CACHE: ${{ inputs.dependency-cache }}
+        CONFIGURE_NODEJS_LOOKUP_ONLY: ${{ inputs.lookup-only }}
+        CONFIGURE_NODEJS_PACKAGE_MANAGER: ${{ steps.resolve-package-manager.outputs.packageManager }}
+        CONFIGURE_NODEJS_PACKAGE_MANAGER_VERSION: ${{ steps.resolve-package-manager.outputs.packageManagerVersion }}
+        CONFIGURE_NODEJS_INSTALL_EXECUTABLE: ${{ steps.resolve-package-manager.outputs.installExecutable }}
+        CONFIGURE_NODEJS_INSTALL_ARGUMENTS: ${{ steps.resolve-package-manager.outputs.installArguments }}
+      with:
+        script: |
+          const path = require('path');
+          const { pathToFileURL } = require('url');
+          const {
+            checkPersistentStore,
+            isPersistentStoreEnabled,
+            normalizeMaxAgeDays,
+            persistentStorePaths,
+            resolvePersistentCorepackHome,
+            resolvePersistentStoreRoot,
+            validatePersistentStoreMode,
+            withStoreDir,
+          } = await import(pathToFileURL(
+            path.join(process.env.GITHUB_ACTION_PATH, 'scripts', 'persistent-store.mjs'),
+          ).href);
+
+          core.setOutput('warm', 'false');
+          if (!isPersistentStoreEnabled(process.env.CONFIGURE_NODEJS_PERSISTENT_STORE_DIR)) {
+            core.setOutput('enabled', 'false');
+            return;
+          }
+
+          validatePersistentStoreMode({
+            dependencyCache: process.env.CONFIGURE_NODEJS_DEPENDENCY_CACHE,
+            lookupOnly: process.env.CONFIGURE_NODEJS_LOOKUP_ONLY,
+            packageManager: process.env.CONFIGURE_NODEJS_PACKAGE_MANAGER,
+            packageManagerVersion: process.env.CONFIGURE_NODEJS_PACKAGE_MANAGER_VERSION,
+          });
+          const maxAgeDays = normalizeMaxAgeDays(
+            process.env.CONFIGURE_NODEJS_PERSISTENT_STORE_MAX_AGE_DAYS,
+          );
+          const root = resolvePersistentStoreRoot({
+            persistentStoreDir: process.env.CONFIGURE_NODEJS_PERSISTENT_STORE_DIR,
+            workspace: process.env.GITHUB_WORKSPACE,
+            home: require('os').homedir(),
+          });
+          const paths = persistentStorePaths(root);
+          const result = checkPersistentStore({
+            paths,
+            now: Math.floor(Date.now() / 1000),
+            maxAgeDays,
+          });
+
+          const messages = {
+            warm: `Persistent pnpm store is warm (seeded ${Math.floor((result.ageSeconds ?? 0) / 3600)} h ago); skipping the dependency cache restore: ${paths.store}`,
+            missing: `No persistent pnpm store at ${paths.store}; seeding it from the dependency cache.`,
+            unreadable: 'Persistent pnpm store seed marker is unreadable; dropped the store to re-seed it.',
+            future: 'Persistent pnpm store seed marker is dated in the future; dropped the store to re-seed it.',
+            expired: `Persistent pnpm store expired (seeded ${Math.floor((result.ageSeconds ?? 0) / 86400)} d ago, limit ${maxAgeDays} d); dropped it to re-seed from the current lockfile.`,
+          };
+          core.info(
+            result.reason === 'missing' && result.dropped
+              ? `Persistent pnpm store at ${paths.store} has no seed marker; dropped it to re-seed it.`
+              : messages[result.reason],
+          );
+
+          const corepack = resolvePersistentCorepackHome({
+            paths,
+            corepackHome: process.env.COREPACK_HOME ?? '',
+            managedCorepackHome: process.env.CONFIGURE_NODEJS_MANAGED_COREPACK_HOME ?? '',
+          });
+          if (corepack.managed) {
+            core.exportVariable('COREPACK_HOME', corepack.home);
+          } else {
+            core.info(`Keeping caller-managed COREPACK_HOME ${corepack.home}.`);
+          }
+
+          core.setOutput('enabled', 'true');
+          core.setOutput('warm', String(result.warm));
+          core.setOutput('root', paths.root);
+          core.setOutput('storePath', paths.store);
+          core.setOutput('electronCachePath', paths.electron);
+          core.setOutput('prebuildCachePath', paths.prebuild);
+          if (result.warm) {
+            const installArguments = withStoreDir(
+              JSON.parse(process.env.CONFIGURE_NODEJS_INSTALL_ARGUMENTS),
+              paths.store,
+            );
+            core.setOutput('installArguments', JSON.stringify(installArguments));
+            core.setOutput(
+              'installCommand',
+              [process.env.CONFIGURE_NODEJS_INSTALL_EXECUTABLE, ...installArguments].join(' '),
+            );
+          }
 
     # The dependency cache key has to carry the Node.js major that will actually
     # run the restored tree, because NODE_MODULE_VERSION -- and therefore the ABI
@@ -340,6 +453,7 @@ runs:
 
     - name: Restore dependencies from cache
       id: cache-dependencies
+      if: steps.persistent-store.outputs.warm != 'true'
       uses: actions/cache/restore@v5
       with:
         path: ${{ steps.resolve-dependency-cache-paths.outputs.cachePaths }}
@@ -383,7 +497,7 @@ runs:
 
     - name: Resolve Corepack cache
       id: resolve-corepack-cache
-      if: steps.resolve-package-manager.outputs.needsCorepack == 'true' && ((inputs.dependency-cache == 'node-modules' && inputs.cache-mode == 'restore') || (inputs.dependency-cache != 'node-modules' && inputs.lookup-only != 'true') || steps.cache-dependencies.outputs.cache-hit != 'true')
+      if: steps.resolve-package-manager.outputs.needsCorepack == 'true' && steps.persistent-store.outputs.enabled != 'true' && ((inputs.dependency-cache == 'node-modules' && inputs.cache-mode == 'restore') || (inputs.dependency-cache != 'node-modules' && inputs.lookup-only != 'true') || steps.cache-dependencies.outputs.cache-hit != 'true')
       uses: actions/github-script@v8
       env:
         CONFIGURE_NODEJS_CACHE_COREPACK: ${{ inputs.cache-corepack }}
@@ -449,6 +563,11 @@ runs:
         CONFIGURE_NODEJS_CACHE_ELECTRON: ${{ steps.resolve-dependency-cache-paths.outputs.cacheElectron }}
         CONFIGURE_NODEJS_ABSOLUTE_PREBUILD_CACHE_PATH: ${{ steps.resolve-dependency-cache-paths.outputs.absolutePrebuildCachePath }}
         CONFIGURE_NODEJS_ABSOLUTE_ELECTRON_CACHE_PATH: ${{ steps.resolve-dependency-cache-paths.outputs.absoluteElectronCachePath }}
+        CONFIGURE_NODEJS_PERSISTENT_STORE_WARM: ${{ steps.persistent-store.outputs.warm }}
+        CONFIGURE_NODEJS_PERSISTENT_STORE_ROOT: ${{ steps.persistent-store.outputs.root }}
+        CONFIGURE_NODEJS_PERSISTENT_STORE_PATH: ${{ steps.persistent-store.outputs.storePath }}
+        CONFIGURE_NODEJS_PERSISTENT_ELECTRON_CACHE_PATH: ${{ steps.persistent-store.outputs.electronCachePath }}
+        CONFIGURE_NODEJS_PERSISTENT_PREBUILD_CACHE_PATH: ${{ steps.persistent-store.outputs.prebuildCachePath }}
       with:
         script: |
           const fs = require('fs');
@@ -457,8 +576,14 @@ runs:
           const cwd = process.env.CONFIGURE_NODEJS_ABSOLUTE_WORKING_DIRECTORY;
           const manager = process.env.CONFIGURE_NODEJS_PACKAGE_MANAGER;
           const version = process.env.CONFIGURE_NODEJS_PACKAGE_MANAGER_VERSION;
-          const expectedStorePath =
-            process.env.CONFIGURE_NODEJS_PNPM_STORE_PATH;
+          // A warm persistent store replaces the workspace store and Electron
+          // caches. A cold one installs in the workspace as usual, so the cache
+          // save sees the same paths, and is moved out after the save.
+          const persistentWarm =
+            process.env.CONFIGURE_NODEJS_PERSISTENT_STORE_WARM === 'true';
+          const expectedStorePath = persistentWarm
+            ? process.env.CONFIGURE_NODEJS_PERSISTENT_STORE_PATH
+            : process.env.CONFIGURE_NODEJS_PNPM_STORE_PATH;
           const setupStartedAt = Number.parseInt(
             process.env.CONFIGURE_NODEJS_SETUP_STARTED_AT,
             10,
@@ -529,16 +654,18 @@ runs:
           );
 
           if (process.env.CONFIGURE_NODEJS_CACHE_ELECTRON === 'true') {
-            const prebuildCachePath =
-              process.env.CONFIGURE_NODEJS_ABSOLUTE_PREBUILD_CACHE_PATH;
-            const electronCachePath =
-              process.env.CONFIGURE_NODEJS_ABSOLUTE_ELECTRON_CACHE_PATH;
+            const prebuildCachePath = persistentWarm
+              ? process.env.CONFIGURE_NODEJS_PERSISTENT_PREBUILD_CACHE_PATH
+              : process.env.CONFIGURE_NODEJS_ABSOLUTE_PREBUILD_CACHE_PATH;
+            const electronCachePath = persistentWarm
+              ? process.env.CONFIGURE_NODEJS_PERSISTENT_ELECTRON_CACHE_PATH
+              : process.env.CONFIGURE_NODEJS_ABSOLUTE_ELECTRON_CACHE_PATH;
             fs.mkdirSync(prebuildCachePath, { recursive: true });
             fs.mkdirSync(electronCachePath, { recursive: true });
             core.exportVariable('npm_config_cache', prebuildCachePath);
             core.exportVariable('electron_config_cache', electronCachePath);
             core.info(
-              `Using workspace-local Electron caches at ${electronCachePath} and ${prebuildCachePath}.`,
+              `Using ${persistentWarm ? 'persistent' : 'workspace-local'} Electron caches at ${electronCachePath} and ${prebuildCachePath}.`,
             );
           }
 
@@ -610,7 +737,11 @@ runs:
             const { assertPathWithinDirectory } = await import(pathToFileURL(
               path.join(process.env.GITHUB_ACTION_PATH, 'scripts', 'resolve-cache-paths.mjs'),
             ).href);
-            assertPathWithinDirectory({ boundaryPath: cwd, candidatePath: expectedStorePath, description: 'pnpm workspace store' });
+            if (persistentWarm) {
+              assertPathWithinDirectory({ boundaryPath: process.env.CONFIGURE_NODEJS_PERSISTENT_STORE_ROOT, candidatePath: expectedStorePath, description: 'Persistent pnpm store' });
+            } else {
+              assertPathWithinDirectory({ boundaryPath: cwd, candidatePath: expectedStorePath, description: 'pnpm workspace store' });
+            }
             fs.mkdirSync(expectedStorePath, { recursive: true });
             assertPathWithinDirectory({ boundaryPath: expectedStorePath, candidatePath: discoveredStorePath, description: 'Discovered pnpm store', allowEqual: true });
             core.info(`Using pnpm store ${discoveredStorePath}.`);
@@ -658,7 +789,9 @@ runs:
         CONFIGURE_NODEJS_CACHE_INPUTS: ${{ inputs.cache-inputs }}
         CONFIGURE_NODEJS_ABSOLUTE_WORKING_DIRECTORY: ${{ steps.resolve-cache-paths.outputs.absoluteWorkingDirectory }}
         CONFIGURE_NODEJS_INSTALL_EXECUTABLE: ${{ steps.resolve-package-manager.outputs.installExecutable }}
-        CONFIGURE_NODEJS_INSTALL_ARGUMENTS: ${{ steps.resolve-package-manager.outputs.installArguments }}
+        CONFIGURE_NODEJS_INSTALL_ARGUMENTS: ${{ steps.persistent-store.outputs.installArguments || steps.resolve-package-manager.outputs.installArguments }}
+        CONFIGURE_NODEJS_PERSISTENT_STORE_WARM: ${{ steps.persistent-store.outputs.warm }}
+        CONFIGURE_NODEJS_PERSISTENT_STORE_ROOT: ${{ steps.persistent-store.outputs.root }}
       with:
         script: |
           const startedAt = Date.now();
@@ -672,9 +805,24 @@ runs:
             ).href);
             removeMaterializedDependencies(process.env.CONFIGURE_NODEJS_ABSOLUTE_WORKING_DIRECTORY);
           }
-          await exec.exec(executable, args, {
-            cwd: process.env.CONFIGURE_NODEJS_ABSOLUTE_WORKING_DIRECTORY,
-          });
+          try {
+            await exec.exec(executable, args, {
+              cwd: process.env.CONFIGURE_NODEJS_ABSOLUTE_WORKING_DIRECTORY,
+            });
+          } catch (error) {
+            // A damaged persistent store must not fail every job until it
+            // expires: drop the marker so the next job re-seeds it.
+            if (process.env.CONFIGURE_NODEJS_PERSISTENT_STORE_WARM === 'true') {
+              const path = require('path');
+              const { pathToFileURL } = require('url');
+              const { invalidatePersistentStore, persistentStorePaths } = await import(pathToFileURL(
+                path.join(process.env.GITHUB_ACTION_PATH, 'scripts', 'persistent-store.mjs'),
+              ).href);
+              invalidatePersistentStore(persistentStorePaths(process.env.CONFIGURE_NODEJS_PERSISTENT_STORE_ROOT));
+              core.warning('Install failed against the persistent pnpm store; removed its seed marker so the next job re-seeds it.');
+            }
+            throw error;
+          }
           if (process.env.CONFIGURE_NODEJS_DEPENDENCY_CACHE === 'node-modules') {
             const path = require('path');
             const { pathToFileURL } = require('url');
@@ -697,7 +845,7 @@ runs:
 
     - name: Detect cacheable dependency paths
       id: detect-cache-paths
-      if: steps.cache-dependencies.outputs.cache-hit != 'true' && inputs.cache-mode != 'restore'
+      if: steps.persistent-store.outputs.warm != 'true' && steps.cache-dependencies.outputs.cache-hit != 'true' && inputs.cache-mode != 'restore'
       uses: actions/github-script@v8
       env:
         CONFIGURE_NODEJS_DEPENDENCY_CACHE: ${{ inputs.dependency-cache }}
@@ -747,11 +895,68 @@ runs:
 
     - name: Save dependencies to cache
       id: save-dependencies
-      if: steps.cache-dependencies.outputs.cache-hit != 'true' && inputs.cache-mode != 'restore' && steps.detect-cache-paths.outputs.exists == 'true'
+      if: steps.persistent-store.outputs.warm != 'true' && steps.cache-dependencies.outputs.cache-hit != 'true' && inputs.cache-mode != 'restore' && steps.detect-cache-paths.outputs.exists == 'true'
       uses: actions/cache/save@v5
       with:
         path: ${{ steps.resolve-dependency-cache-paths.outputs.cachePaths }}
         key: ${{ steps.resolve-dependency-cache-paths.outputs.cacheKey }}
+
+    # Cold persistent path: the restore, install, and any save above used the
+    # workspace paths, so the cache entry stays shared with default-mode jobs.
+    # Now move the store and Electron caches out of checkout's reach.
+    - name: Seed persistent pnpm store
+      id: seed-persistent-store
+      if: steps.persistent-store.outputs.enabled == 'true' && steps.persistent-store.outputs.warm != 'true'
+      uses: actions/github-script@v8
+      env:
+        CONFIGURE_NODEJS_PERSISTENT_STORE_ROOT: ${{ steps.persistent-store.outputs.root }}
+        CONFIGURE_NODEJS_PNPM_STORE_PATH: ${{ steps.resolve-dependency-cache-paths.outputs.absolutePnpmStorePath }}
+        CONFIGURE_NODEJS_DISCOVERED_PNPM_STORE_PATH: ${{ steps.prepare-package-manager.outputs.pnpmStorePath }}
+        CONFIGURE_NODEJS_CACHE_ELECTRON: ${{ steps.resolve-dependency-cache-paths.outputs.cacheElectron }}
+        CONFIGURE_NODEJS_ABSOLUTE_PREBUILD_CACHE_PATH: ${{ steps.resolve-dependency-cache-paths.outputs.absolutePrebuildCachePath }}
+        CONFIGURE_NODEJS_ABSOLUTE_ELECTRON_CACHE_PATH: ${{ steps.resolve-dependency-cache-paths.outputs.absoluteElectronCachePath }}
+      with:
+        script: |
+          const startedAt = Date.now();
+          const path = require('path');
+          const { pathToFileURL } = require('url');
+          const {
+            persistentStorePaths,
+            relocateStorePath,
+            seedPersistentStore,
+          } = await import(pathToFileURL(
+            path.join(process.env.GITHUB_ACTION_PATH, 'scripts', 'persistent-store.mjs'),
+          ).href);
+          const paths = persistentStorePaths(process.env.CONFIGURE_NODEJS_PERSISTENT_STORE_ROOT);
+          const cacheElectron = process.env.CONFIGURE_NODEJS_CACHE_ELECTRON === 'true';
+          const workspaceStore = process.env.CONFIGURE_NODEJS_PNPM_STORE_PATH;
+          const result = seedPersistentStore({
+            paths,
+            workspaceStore,
+            workspaceElectron: cacheElectron ? process.env.CONFIGURE_NODEJS_ABSOLUTE_ELECTRON_CACHE_PATH : '',
+            workspacePrebuild: cacheElectron ? process.env.CONFIGURE_NODEJS_ABSOLUTE_PREBUILD_CACHE_PATH : '',
+            now: Math.floor(Date.now() / 1000),
+          });
+          if (!result.seeded) {
+            core.warning(`No workspace pnpm store at ${workspaceStore}; the persistent store stays cold.`);
+            return;
+          }
+
+          // Later steps in this job use the moved store and caches.
+          for (const name of ['PNPM_CONFIG_STORE_DIR', 'npm_config_store_dir']) {
+            core.exportVariable(name, paths.store);
+          }
+          if (cacheElectron) {
+            core.exportVariable('npm_config_cache', paths.prebuild);
+            core.exportVariable('electron_config_cache', paths.electron);
+          }
+          core.setOutput('pnpmStorePath', relocateStorePath({
+            discoveredStorePath: process.env.CONFIGURE_NODEJS_DISCOVERED_PNPM_STORE_PATH,
+            workspaceStore,
+            persistentStore: paths.store,
+          }));
+          core.setOutput('durationMs', Date.now() - startedAt);
+          core.info(`Seeded the persistent pnpm store at ${paths.store} (moved: ${result.moved.join(', ')}).`);
 
     # cache/save reports some service failures as warnings. A cold completed
     # producer must not report success unless the consumer's exact entry exists.
@@ -790,6 +995,9 @@ runs:
         CONFIGURE_NODEJS_INSTALL_DURATION_MS: ${{ steps.install-dependencies.outputs.durationMs }}
         CONFIGURE_NODEJS_CACHE_SAVE_STARTED_AT: ${{ steps.detect-cache-paths.outputs.cacheSaveStartedAt }}
         CONFIGURE_NODEJS_CACHE_SAVED: ${{ steps.cache-dependencies.outputs.cache-hit != 'true' && steps.detect-cache-paths.outputs.exists == 'true' }}
+        CONFIGURE_NODEJS_PERSISTENT_STORE_ENABLED: ${{ steps.persistent-store.outputs.enabled }}
+        CONFIGURE_NODEJS_PERSISTENT_STORE_WARM: ${{ steps.persistent-store.outputs.warm }}
+        CONFIGURE_NODEJS_PERSISTENT_STORE_SEED_DURATION_MS: ${{ steps.seed-persistent-store.outputs.durationMs }}
       with:
         script: |
           const numberOrZero = (value) => {
@@ -835,22 +1043,40 @@ runs:
             core.setOutput(name, value);
           }
 
-          core.notice(
-            `configure-nodejs timings (ms): ${JSON.stringify(timings)}`,
+          const persistentStore =
+            process.env.CONFIGURE_NODEJS_PERSISTENT_STORE_ENABLED === 'true'
+              ? (process.env.CONFIGURE_NODEJS_PERSISTENT_STORE_WARM === 'true' ? 'warm' : 'cold')
+              : '';
+          const persistentSeedDurationMs = numberOrZero(
+            process.env.CONFIGURE_NODEJS_PERSISTENT_STORE_SEED_DURATION_MS,
           );
-          await core.summary
-            .addHeading('configure-nodejs phase timings', 3)
-            .addTable([
-              [
-                { data: 'Phase', header: true },
-                { data: 'Milliseconds', header: true },
-              ],
-              ['Cache restore', String(timings.cacheRestoreDurationMs)],
-              ['Setup Node.js', String(timings.setupNodeDurationMs)],
-              ['Package-manager activation', String(timings.activationDurationMs)],
-              ['pnpm store discovery', String(timings.storeDiscoveryDurationMs)],
-              ['Dependency install', String(timings.installDurationMs)],
-              ['Cache save', String(timings.cacheSaveDurationMs)],
-              ['Total action', String(timings.totalDurationMs)],
-            ])
-            .write();
+
+          core.notice(
+            `configure-nodejs timings (ms): ${JSON.stringify(timings)}${persistentStore ? ` persistent store: ${persistentStore}` : ''}`,
+          );
+          const rows = [
+            [
+              { data: 'Phase', header: true },
+              { data: 'Milliseconds', header: true },
+            ],
+            ['Cache restore', String(timings.cacheRestoreDurationMs)],
+            ['Setup Node.js', String(timings.setupNodeDurationMs)],
+            ['Package-manager activation', String(timings.activationDurationMs)],
+            ['pnpm store discovery', String(timings.storeDiscoveryDurationMs)],
+            ['Dependency install', String(timings.installDurationMs)],
+            ['Cache save', String(timings.cacheSaveDurationMs)],
+          ];
+          if (persistentStore === 'cold') {
+            rows.push(['Persistent store seed', String(persistentSeedDurationMs)]);
+          }
+          rows.push(['Total action', String(timings.totalDurationMs)]);
+          const summary = core.summary.addHeading('configure-nodejs phase timings', 3);
+          if (persistentStore) {
+            summary.addRaw(
+              persistentStore === 'warm'
+                ? 'Persistent pnpm store was warm; the dependency cache restore was skipped.'
+                : 'Persistent pnpm store was cold; restored as usual, then seeded.',
+              true,
+            );
+          }
+          await summary.addTable(rows).write();

@@ -450,3 +450,212 @@ test('executed install failure and lifecycle lock mutation cannot complete popul
     assert.equal(fs.existsSync(path.join(cwd, '.cache/configure-nodejs/completed-tree.json')), false);
   }
 });
+
+test('default mode leaves every pre-existing step condition unchanged', () => {
+  // The check step always runs; without persistent-store-dir it reports
+  // enabled=false and warm=false, which must not change any decision.
+  for (const lookupOnly of ['true', 'false']) for (const hit of ['true', 'false']) {
+    const inputs = { 'dependency-cache': 'default', 'cache-mode': 'auto', 'lookup-only': lookupOnly };
+    const base = { 'resolve-cache-paths': { nodeVersionIsFloating: 'false' }, 'resolve-package-manager': { needsCorepack: 'true' }, 'cache-dependencies': { 'cache-hit': hit }, 'detect-cache-paths': { exists: 'true' } };
+    const withCheck = { ...base, 'persistent-store': { enabled: 'false', warm: 'false' } };
+    for (const id of ['setup-node', 'resolve-corepack-cache', 'prepare-package-manager', 'detect-cache-paths', 'save-dependencies']) {
+      assert.equal(condition(id, inputs, withCheck), condition(id, inputs, base), `${id}/${lookupOnly}/${hit}`);
+    }
+    assert.equal(condition('cache-dependencies', inputs, withCheck), true);
+    assert.equal(condition('seed-persistent-store', inputs, withCheck), false);
+  }
+});
+
+test('a warm persistent store skips the dependency restore, Corepack cache, and save', () => {
+  const inputs = { 'dependency-cache': 'default', 'cache-mode': 'auto', 'lookup-only': 'false' };
+  const steps = (warm) => ({
+    'resolve-cache-paths': { nodeVersionIsFloating: 'false' },
+    'resolve-package-manager': { needsCorepack: 'true' },
+    'persistent-store': { enabled: 'true', warm },
+    'cache-dependencies': warm === 'true' ? {} : { 'cache-hit': 'false' },
+    'detect-cache-paths': { exists: 'true' },
+  });
+  const warm = steps('true');
+  assert.equal(condition('cache-dependencies', inputs, warm), false);
+  assert.equal(condition('resolve-corepack-cache', inputs, warm), false);
+  assert.equal(condition('detect-cache-paths', inputs, warm), false);
+  assert.equal(condition('save-dependencies', inputs, warm), false);
+  assert.equal(condition('seed-persistent-store', inputs, warm), false);
+  assert.equal(condition('setup-node', inputs, warm), true);
+  assert.equal(condition('prepare-package-manager', inputs, warm), true);
+
+  const cold = steps('false');
+  assert.equal(condition('cache-dependencies', inputs, cold), true);
+  assert.equal(condition('resolve-corepack-cache', inputs, cold), false, 'Corepack lives on the persistent disk');
+  assert.equal(condition('save-dependencies', inputs, cold), true, 'a cold miss still saves the shared cache entry');
+  assert.equal(condition('seed-persistent-store', inputs, cold), true);
+});
+
+test('the seed runs after the cache save and the check before any restore', () => {
+  const check = stepBlock('persistent-store').first;
+  assert.ok(check < stepBlock('setup-node-floating').first);
+  assert.ok(check < stepBlock('cache-dependencies').first);
+  assert.ok(check < stepBlock('resolve-corepack-cache').first);
+  const seed = stepBlock('seed-persistent-store').first;
+  assert.ok(stepBlock('install-dependencies').first < seed);
+  assert.ok(stepBlock('save-dependencies').first < seed);
+  assert.match(stepBlock('install-dependencies').lines.join('\n'), /CONFIGURE_NODEJS_INSTALL_ARGUMENTS: \$\{\{ steps\.persistent-store\.outputs\.installArguments \|\| steps\.resolve-package-manager\.outputs\.installArguments \}\}/);
+  assert.match(actionYaml, /  persistent-store-dir:\r?\n    description: .*\r?\n    default: ""/);
+  assert.match(actionYaml, /  persistent-store-max-age-days:\r?\n    description: .*\r?\n    default: "14"/);
+});
+
+function persistentEnv(overrides = {}) {
+  return {
+    GITHUB_ACTION_PATH: path.dirname(actionPath),
+    CONFIGURE_NODEJS_PERSISTENT_STORE_MAX_AGE_DAYS: '14',
+    CONFIGURE_NODEJS_DEPENDENCY_CACHE: 'default',
+    CONFIGURE_NODEJS_LOOKUP_ONLY: 'false',
+    CONFIGURE_NODEJS_PACKAGE_MANAGER: 'pnpm',
+    CONFIGURE_NODEJS_PACKAGE_MANAGER_VERSION: '10.33.0',
+    CONFIGURE_NODEJS_INSTALL_EXECUTABLE: 'pnpm',
+    CONFIGURE_NODEJS_INSTALL_ARGUMENTS: '["install","--frozen-lockfile","--store-dir",".pnpm-store"]',
+    ...overrides,
+  };
+}
+
+function recordingCore() {
+  const outputs = {};
+  const exports = {};
+  const messages = [];
+  return {
+    outputs, exports, messages,
+    core: {
+      setOutput: (key, value) => { outputs[key] = value; },
+      exportVariable: (key, value) => { exports[key] = value; },
+      info: (message) => messages.push(message),
+      warning: (message) => messages.push(message),
+    },
+  };
+}
+
+test('executed check step: disabled by default, warm and cold when enabled', async (t) => {
+  const base = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'persistent-check-')));
+  t.after(() => fs.rmSync(base, { recursive: true, force: true }));
+  const workspace = path.join(base, 'workspace');
+  const root = path.join(base, 'cache');
+  fs.mkdirSync(workspace);
+  const run = scriptFunction('persistent-store');
+
+  const disabled = recordingCore();
+  await run(disabled.core, createRequire(import.meta.url), { env: persistentEnv({ CONFIGURE_NODEJS_PERSISTENT_STORE_DIR: '', GITHUB_WORKSPACE: workspace }) });
+  assert.deepEqual(disabled.outputs, { warm: 'false', enabled: 'false' });
+  assert.deepEqual(disabled.exports, {});
+
+  const cold = recordingCore();
+  await run(cold.core, createRequire(import.meta.url), { env: persistentEnv({ CONFIGURE_NODEJS_PERSISTENT_STORE_DIR: root, GITHUB_WORKSPACE: workspace }) });
+  assert.equal(cold.outputs.enabled, 'true');
+  assert.equal(cold.outputs.warm, 'false');
+  assert.equal(cold.outputs.installArguments, undefined, 'a cold store installs into the workspace store');
+  assert.equal(cold.exports.COREPACK_HOME, path.join(root, 'corepack'));
+
+  fs.writeFileSync(path.join(root, '.configure-nodejs-seeded'), String(Math.floor(Date.now() / 1000) - 3600));
+  const warm = recordingCore();
+  await run(warm.core, createRequire(import.meta.url), { env: persistentEnv({ CONFIGURE_NODEJS_PERSISTENT_STORE_DIR: root, GITHUB_WORKSPACE: workspace, COREPACK_HOME: '/caller/corepack' }) });
+  assert.equal(warm.outputs.warm, 'true');
+  assert.deepEqual(JSON.parse(warm.outputs.installArguments), ['install', '--frozen-lockfile', '--store-dir', path.join(root, 'pnpm-store')]);
+  assert.equal(warm.outputs.installCommand, `pnpm install --frozen-lockfile --store-dir ${path.join(root, 'pnpm-store')}`);
+  assert.deepEqual(warm.exports, {}, 'a caller-managed COREPACK_HOME is preserved');
+
+  for (const [overrides, message] of [
+    [{ CONFIGURE_NODEJS_PERSISTENT_STORE_DIR: path.join(workspace, 'store') }, /inside the workspace/],
+    [{ CONFIGURE_NODEJS_PERSISTENT_STORE_DIR: root, CONFIGURE_NODEJS_LOOKUP_ONLY: 'true' }, /lookup-only/],
+    [{ CONFIGURE_NODEJS_PERSISTENT_STORE_DIR: root, CONFIGURE_NODEJS_PACKAGE_MANAGER: 'npm' }, /pnpm only/],
+    [{ CONFIGURE_NODEJS_PERSISTENT_STORE_DIR: root, CONFIGURE_NODEJS_PERSISTENT_STORE_MAX_AGE_DAYS: '0' }, /max-age-days/],
+  ]) {
+    await assert.rejects(run(recordingCore().core, createRequire(import.meta.url), { env: persistentEnv({ GITHUB_WORKSPACE: workspace, ...overrides }) }), message);
+  }
+});
+
+test('executed prepare uses the workspace store by default and the persistent store when warm', async (t) => {
+  const base = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'persistent-prepare-')));
+  t.after(() => fs.rmSync(base, { recursive: true, force: true }));
+  const cwd = path.join(base, 'workspace');
+  const root = path.join(base, 'cache');
+  fs.mkdirSync(cwd);
+  fs.mkdirSync(root);
+  const run = scriptFunction('prepare-package-manager');
+  const scenarios = {
+    default: { store: path.join(cwd, '.pnpm-store'), env: {} },
+    warm: {
+      store: path.join(root, 'pnpm-store'),
+      env: {
+        CONFIGURE_NODEJS_PERSISTENT_STORE_WARM: 'true',
+        CONFIGURE_NODEJS_PERSISTENT_STORE_ROOT: root,
+        CONFIGURE_NODEJS_PERSISTENT_STORE_PATH: path.join(root, 'pnpm-store'),
+        CONFIGURE_NODEJS_PERSISTENT_ELECTRON_CACHE_PATH: path.join(root, 'electron'),
+        CONFIGURE_NODEJS_PERSISTENT_PREBUILD_CACHE_PATH: path.join(root, 'npm'),
+      },
+    },
+  };
+  for (const [name, scenario] of Object.entries(scenarios)) {
+    const env = {
+      GITHUB_ACTION_PATH: path.dirname(actionPath),
+      CONFIGURE_NODEJS_ABSOLUTE_WORKING_DIRECTORY: cwd,
+      CONFIGURE_NODEJS_PACKAGE_MANAGER: 'pnpm',
+      CONFIGURE_NODEJS_PACKAGE_MANAGER_VERSION: '10.33.0',
+      CONFIGURE_NODEJS_PNPM_STORE_PATH: path.join(cwd, '.pnpm-store'),
+      CONFIGURE_NODEJS_NODE_CACHE_KEY_MAJOR: '24',
+      CONFIGURE_NODEJS_INSTALLED_NODE_VERSION: '24.14.1',
+      CONFIGURE_NODEJS_DEPENDENCY_CACHE: 'default',
+      CONFIGURE_NODEJS_CACHE_MODE: 'auto',
+      CONFIGURE_NODEJS_NEEDS_COREPACK: 'true',
+      CONFIGURE_NODEJS_CACHE_ELECTRON: 'true',
+      CONFIGURE_NODEJS_ABSOLUTE_PREBUILD_CACHE_PATH: path.join(cwd, '.cache/configure-nodejs/npm'),
+      CONFIGURE_NODEJS_ABSOLUTE_ELECTRON_CACHE_PATH: path.join(cwd, '.cache/configure-nodejs/electron'),
+      ...scenario.env,
+    };
+    const recorded = recordingCore();
+    const exec = {
+      exec: async () => {},
+      getExecOutput: async (command, args) => ({
+        stdout: args[0] === '--version' ? '10.33.0' : path.join(env.PNPM_CONFIG_STORE_DIR, 'v10'),
+      }),
+    };
+    await run(recorded.core, createRequire(import.meta.url), { env, platform: process.platform }, exec);
+    assert.equal(recorded.exports.PNPM_CONFIG_STORE_DIR, scenario.store, name);
+    assert.equal(recorded.exports.npm_config_store_dir, scenario.store, name);
+    assert.equal(recorded.outputs.pnpmStorePath, path.join(scenario.store, 'v10'), name);
+    assert.equal(recorded.outputs.shouldInstall, 'true', name);
+    const electronRoot = name === 'warm' ? root : path.join(cwd, '.cache/configure-nodejs');
+    assert.equal(recorded.exports.electron_config_cache, path.join(electronRoot, 'electron'), name);
+    assert.equal(recorded.exports.npm_config_cache, path.join(electronRoot, 'npm'), name);
+  }
+});
+
+test('executed warm install failure drops the seed marker; other failures leave it', async (t) => {
+  const base = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'persistent-install-')));
+  t.after(() => fs.rmSync(base, { recursive: true, force: true }));
+  const root = path.join(base, 'cache');
+  fs.mkdirSync(path.join(root, 'pnpm-store'), { recursive: true });
+  const marker = path.join(root, '.configure-nodejs-seeded');
+  const run = scriptFunction('install-dependencies');
+  for (const [warm, succeed, markerSurvives] of [['true', false, false], ['false', false, true], ['', false, true], ['true', true, true]]) {
+    fs.writeFileSync(marker, '1800000000');
+    const env = {
+      GITHUB_ACTION_PATH: path.dirname(actionPath),
+      CONFIGURE_NODEJS_ABSOLUTE_WORKING_DIRECTORY: base,
+      CONFIGURE_NODEJS_DEPENDENCY_CACHE: 'default',
+      CONFIGURE_NODEJS_INSTALL_EXECUTABLE: 'pnpm',
+      CONFIGURE_NODEJS_INSTALL_ARGUMENTS: JSON.stringify(['install', '--frozen-lockfile', '--store-dir', path.join(root, 'pnpm-store')]),
+      CONFIGURE_NODEJS_PERSISTENT_STORE_WARM: warm,
+      CONFIGURE_NODEJS_PERSISTENT_STORE_ROOT: warm === '' ? '' : root,
+    };
+    const calls = [];
+    const exec = { exec: async (command, args) => {
+      calls.push([command, args]);
+      if (!succeed) throw new Error('The process pnpm failed with exit code 1');
+    } };
+    const recorded = recordingCore();
+    const result = run(recorded.core, createRequire(import.meta.url), { env }, exec);
+    if (succeed) await result;
+    else await assert.rejects(result, /exit code 1/);
+    assert.equal(fs.existsSync(marker), markerSurvives, `warm=${warm} succeed=${succeed}`);
+    assert.deepEqual(calls[0][1].slice(-2), ['--store-dir', path.join(root, 'pnpm-store')]);
+    assert.ok(fs.existsSync(path.join(root, 'pnpm-store')), 'only the marker is removed');
+  }
+});

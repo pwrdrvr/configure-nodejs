@@ -235,6 +235,8 @@ By the time `Test` ran the cache was already written. If `Test` had failed, the 
 | `cache-corepack` | `"true"` | Cache pinned pnpm/Yarn executables. Set to `"false"` to disable the separate Corepack cache. Caller-supplied `COREPACK_HOME` is preserved and left caller-managed |
 | `cache-electron` | `"false"` | When `true`, caches the workspace-local Electron runtime download cache and native-addon prebuild download cache, and points lifecycle scripts at them. See [Electron lifecycle download caches](#electron-lifecycle-download-caches) |
 | `lookup-only` | `"false"` | When `true`, only checks whether the cache exists and skips downloading it; on a cache hit the action also skips `setup-node` and install-time package-manager setup. See [the gate job pattern](#the-fix-a-gate-job-that-only-primes-the-cache) |
+| `persistent-store-dir` | `""` | Self-hosted runners whose disk survives between jobs: an absolute path (a leading `~/` is expanded) outside the workspace that keeps the pnpm store, Corepack home, and Electron caches. A warm store skips the dependency cache restore. pnpm only. See [Persistent pnpm store](#persistent-pnpm-store-on-self-hosted-runners-opt-in) |
+| `persistent-store-max-age-days` | `"14"` | Days a seeded persistent store stays warm. After that it is dropped and re-seeded from the current lockfile's cache, which bounds its growth |
 
 ### Caching behavior
 
@@ -352,8 +354,57 @@ jobs:
 
 On the first opt-in miss, the `lookup-only` gate still sets up Node.js, installs dependencies, populates both lifecycle caches, and saves them with the package-manager cache. On a hit, the gate only performs the lookup. Its downstream jobs restore all three cache components before postinstall runs. Repeat the opt-in on every OS/architecture-specific gate and consumer that should share this behavior.
 
+### Persistent pnpm store on self-hosted runners (opt-in)
+
+A self-hosted runner whose disk survives between jobs (a long-lived VM or machine) gets little from the default layout. `actions/checkout` runs `git clean -ffdx`, which deletes the in-workspace `.pnpm-store` at the start of every job, so every job restores the same dependency archive only for `pnpm install` to finish in a few seconds against it. Set `persistent-store-dir` to keep the store outside the workspace, where checkout cannot reach it:
+
+```yaml
+jobs:
+  e2e-macos:
+    runs-on: [self-hosted, macOS]
+    steps:
+      - uses: actions/checkout@v6
+      - id: node
+        uses: pwrdrvr/configure-nodejs@v1
+        with:
+          node-version: 24.x
+          cache-electron: "true"
+          persistent-store-dir: ~/Library/Caches/my-repo-ci
+      - run: echo "warm=${{ steps.node.outputs.persistent-store-warm }}"
+      - run: pnpm test
+```
+
+The action owns these entries under the root, and creates or deletes nothing else there:
+
+| Entry | Holds |
+| --- | --- |
+| `pnpm-store/` | The pnpm store (`PNPM_CONFIG_STORE_DIR`, `--store-dir`) |
+| `corepack/` | `COREPACK_HOME`, unless you set your own `COREPACK_HOME` |
+| `electron/`, `npm/` | The Electron runtime and prebuild download caches, when `cache-electron: "true"` |
+| `.configure-nodejs-seeded` | The seed marker: the time the store was seeded, in epoch seconds |
+
+| Store state | What runs |
+| --- | --- |
+| **Warm**: marker present, readable, not future-dated, younger than `persistent-store-max-age-days` | No dependency cache restore and no save. `actions/setup-node`, Corepack activation with an explicit check that `pnpm --version` matches `package.json#packageManager`, then `pnpm install --frozen-lockfile --store-dir <root>/pnpm-store`. Packages missing from the store still come from the registry |
+| **Cold**: marker missing, unreadable, future-dated, or expired | Drop the store and its caches, then run exactly as in default mode: restore the dependency cache into the workspace, install, and save on a miss, so the cache entry stays shared with default-mode jobs. Then move the workspace store and Electron caches under the root, write the marker last, and point the job's environment at the moved paths |
+
+If the install fails against a warm store, the action removes the marker before failing, so the next job re-seeds instead of failing until the store expires. Expiry also bounds growth: a re-seeded store holds only what the current lockfile's cache and install put there.
+
+Requirements and limits:
+
+- pnpm only, with an exact `package.json#packageManager` pin. Corepack checks a pin's hash only when it downloads; a copy already in the persistent `COREPACK_HOME` runs unchecked, which is why the activated version is checked against the pin. Dropping the store also drops the Corepack home, so the download (and its hash check) repeats at least once per expiry period.
+- Cannot be combined with `lookup-only` or `dependency-cache: node-modules`; the action fails if you try.
+- The root must be an absolute path. It cannot be a filesystem root, your home directory or one of its ancestors, the workspace, inside it, or one of its ancestors. Symbolic links are resolved before these checks, and a symbolic link in place of a managed entry fails the job rather than being followed.
+- Keep the root on the same volume as the workspace. The move is then a rename, and pnpm can hardlink or clone from the store; across volumes the move falls back to a copy, and pnpm has to copy every file into `node_modules`.
+- The store is shared across Node.js majors. pnpm keys built side effects by platform, architecture, and Node.js major inside its store, and the Node-major mismatch warning still applies.
+- Each job's `node_modules` is still rebuilt by `pnpm install`; only the downloads are kept.
+
+**Concurrency.** A runner executes one job at a time, and pnpm's store is safe for concurrent installs. Seeding, expiry, and invalidation are not coordinated between runners, though: if two runners share a disk, a cold job on one can drop a store the other is installing from. That job then fails its install and the next job re-seeds, but to avoid it give each runner its own root, for example `~/Library/Caches/my-repo-ci/${{ runner.name }}`. Use one root per repository, too: seeding replaces the whole store with one repository's cache.
+
+**Trust boundary.** Everything under the root is reused by later jobs on the same runner without verification beyond pnpm's own store integrity checks. A job that can write to the root can influence what later jobs install, including jobs from other branches and workflows. That is not new: any job on a persistent runner can already leave state behind on it, for example in the home directory or the tool cache. Use persistent mode only on runners whose jobs you already trust to share a machine, and not on runners that build untrusted pull requests alongside privileged jobs.
+
 <details>
-<summary><b>All 20 outputs</b> — <code>package-manager</code>, <code>lockfile-sha</code>, <code>cache-hit</code>, <code>node-major</code>, <code>pnpm-store-path</code>, <code>install-command</code>, and per-phase timings in milliseconds.</summary>
+<summary><b>All 21 outputs</b> — <code>package-manager</code>, <code>lockfile-sha</code>, <code>cache-hit</code>, <code>node-major</code>, <code>pnpm-store-path</code>, <code>persistent-store-warm</code>, <code>install-command</code>, and per-phase timings in milliseconds.</summary>
 
 | Output | Description |
 | --- | --- |
@@ -369,7 +420,8 @@ On the first opt-in miss, the `lookup-only` gate still sets up Node.js, installs
 | `cache-key` | Exact dependency key; producers and compatible consumers must agree |
 | `cache-hit` | `true` when the dependency cache entry exists for the computed key |
 | `node-major` | Node.js major version the dependency cache key was built from |
-| `pnpm-store-path` | Absolute workspace-local pnpm store path when pnpm setup runs |
+| `pnpm-store-path` | Absolute pnpm store path when pnpm setup runs: workspace-local by default, under `persistent-store-dir` in persistent mode |
+| `persistent-store-warm` | `true` when a warm persistent store let the dependency cache restore be skipped; `false` otherwise, including when persistent mode is off |
 | `cache-restore-duration-ms` | Measured cache restore phase duration |
 | `setup-node-duration-ms` | Measured `actions/setup-node` phase duration |
 | `package-manager-activation-duration-ms` | Measured Corepack/package-manager activation duration |
