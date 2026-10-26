@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { assertPathWithinDirectory } from './resolve-cache-paths.mjs';
+import { EXACT_PNPM_PIN } from './completed-tree.mjs';
+import { assertPathWithinDirectory, findNearestExistingPath, isPathWithin } from './resolve-cache-paths.mjs';
 
 // A persistent self-hosted runner keeps its disk between jobs, but checkout's
 // `git clean -ffdx` deletes the in-workspace pnpm store every time. This module
@@ -17,6 +18,7 @@ export const PERSISTENT_STORE_ENTRIES = Object.freeze({
   corepack: 'corepack',
 });
 export const SEED_MARKER_NAME = '.configure-nodejs-seeded';
+const SEED_MARKER_TEMPORARY_NAME = `${SEED_MARKER_NAME}.tmp`;
 export const DEFAULT_MAX_AGE_DAYS = 14;
 const INCOMING_SUFFIX = '.incoming';
 const SECONDS_PER_DAY = 86400;
@@ -52,37 +54,16 @@ export function validatePersistentStoreMode({
   if (packageManager !== 'pnpm') {
     throw new Error(`persistent-store-dir supports pnpm only; resolved package manager is ${packageManager || 'unknown'}.`);
   }
-  if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+sha\d+\.[0-9a-fA-F]+)?$/.test(packageManagerVersion)) {
+  if (!EXACT_PNPM_PIN.test(packageManagerVersion)) {
     throw new Error('persistent-store-dir requires an exact pnpm pin in package.json#packageManager.');
   }
-}
-
-function comparable(value, platform) {
-  const resolved = path.resolve(value);
-  return platform === 'win32' ? resolved.toLowerCase() : resolved;
-}
-
-function isWithin(parent, child, platform) {
-  const relative = path.relative(comparable(parent, platform), comparable(child, platform));
-  return relative === '' || (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
 }
 
 // Resolve symlinks in the part of the path that exists, so a root that only
 // looks safe (a link to `/`, or into the workspace) is judged by its target.
 function realPathOfPossiblyMissing(candidate) {
-  const missing = [];
-  let current = candidate;
-  while (true) {
-    try {
-      return path.join(fs.realpathSync(current), ...missing.reverse());
-    } catch (error) {
-      if (error.code !== 'ENOENT' && error.code !== 'ENOTDIR') throw error;
-    }
-    const parent = path.dirname(current);
-    if (parent === current) return candidate;
-    missing.push(path.basename(current));
-    current = parent;
-  }
+  const existing = findNearestExistingPath(candidate);
+  return path.join(fs.realpathSync(existing), path.relative(existing, candidate));
 }
 
 // The root is where every delete in persistent mode happens, so it must be an
@@ -92,7 +73,6 @@ export function resolvePersistentStoreRoot({
   persistentStoreDir,
   workspace,
   home = '',
-  platform = process.platform,
 }) {
   let given = String(persistentStoreDir).trim();
   // Workflow inputs cannot expand $HOME, so accept a leading `~`.
@@ -120,15 +100,20 @@ export function resolvePersistentStoreRoot({
     for (const [name, protectedPath] of protectedPaths) {
       // An ancestor of the workspace or home could name it as a managed entry
       // (a workspace or user called `npm`), so ancestors are rejected too.
-      if (isWithin(candidate, protectedPath, platform)) {
+      if (isPathWithin(candidate, protectedPath)) {
         throw new Error(`persistent-store-dir "${given}" is ${name} or contains it.`);
       }
-      if (name === 'the workspace' && isWithin(protectedPath, candidate, platform)) {
+      if (name === 'the workspace' && isPathWithin(protectedPath, candidate)) {
         throw new Error(`persistent-store-dir "${given}" is inside the workspace, where checkout would delete it.`);
       }
     }
   }
   return real;
+}
+
+// The runner empties RUNNER_TEMP before every job, so a root there never warms.
+export function isUnderRunnerTemp({ root, runnerTemp = '' }) {
+  return runnerTemp !== '' && isPathWithin(realPathOfPossiblyMissing(path.resolve(runnerTemp)), root);
 }
 
 export function persistentStorePaths(root) {
@@ -139,6 +124,7 @@ export function persistentStorePaths(root) {
     prebuild: path.join(root, PERSISTENT_STORE_ENTRIES.prebuild),
     corepack: path.join(root, PERSISTENT_STORE_ENTRIES.corepack),
     marker: path.join(root, SEED_MARKER_NAME),
+    markerTemporary: path.join(root, SEED_MARKER_TEMPORARY_NAME),
   };
 }
 
@@ -174,6 +160,7 @@ export function readSeedMarker(markerPath, { now, maxAgeDays }) {
 // than a half-deleted one that the next job trusts.
 export function dropPersistentStore(paths) {
   removeManaged(paths.root, paths.marker);
+  removeManaged(paths.root, paths.markerTemporary);
   for (const name of Object.values(PERSISTENT_STORE_ENTRIES)) {
     removeManaged(paths.root, path.join(paths.root, name));
     removeManaged(paths.root, path.join(paths.root, `${name}${INCOMING_SUFFIX}`));
@@ -192,15 +179,42 @@ function hasManagedContent(paths) {
 
 // Decide warm or cold. Anything other than warm drops the store, so the next
 // seed starts from only the current lockfile's cache; that bounds its growth.
+// A marker whose store has since been deleted is cold too: re-seeding from the
+// cache archive is faster than downloading the whole tree from the registry.
 export function checkPersistentStore({ paths, now, maxAgeDays }) {
   fs.mkdirSync(paths.root, { recursive: true });
   const marker = readSeedMarker(paths.marker, { now, maxAgeDays });
-  if (marker.state === 'warm') {
+  const storePresent = fs.existsSync(paths.store) && fs.statSync(paths.store).isDirectory();
+  if (marker.state === 'warm' && storePresent) {
     return { warm: true, reason: 'warm', ageSeconds: marker.ageSeconds, dropped: false };
   }
-  const dropped = marker.state !== 'missing' || hasManagedContent(paths);
+  const reason = marker.state === 'warm' ? 'incomplete' : marker.state;
+  const dropped = reason !== 'missing' || hasManagedContent(paths);
   if (dropped) dropPersistentStore(paths);
-  return { warm: false, reason: marker.state, ageSeconds: marker.ageSeconds, dropped };
+  return { warm: false, reason, ageSeconds: marker.ageSeconds, dropped };
+}
+
+export function describePersistentStoreCheck(result, { paths, maxAgeDays }) {
+  const hours = Math.floor((result.ageSeconds ?? 0) / 3600);
+  const days = Math.floor((result.ageSeconds ?? 0) / 86400);
+  switch (result.reason) {
+    case 'warm':
+      return `Persistent pnpm store is warm (seeded ${hours} h ago); skipping the dependency cache restore: ${paths.store}`;
+    case 'missing':
+      return result.dropped
+        ? `Persistent pnpm store at ${paths.store} has no seed marker; dropped it to re-seed it.`
+        : `No persistent pnpm store at ${paths.store}; seeding it from the dependency cache.`;
+    case 'incomplete':
+      return `Persistent pnpm store at ${paths.store} is missing although its seed marker is present; re-seeding it.`;
+    case 'unreadable':
+      return 'Persistent pnpm store seed marker is unreadable; dropped the store to re-seed it.';
+    case 'future':
+      return 'Persistent pnpm store seed marker is dated in the future; dropped the store to re-seed it.';
+    case 'expired':
+      return `Persistent pnpm store expired (seeded ${days} d ago, limit ${maxAgeDays} d); dropped it to re-seed from the current lockfile.`;
+    default:
+      throw new Error(`Unknown persistent store state ${result.reason}.`);
+  }
 }
 
 function pause(milliseconds) {
@@ -249,10 +263,11 @@ function moveInto(paths, source, destination, rename) {
   return true;
 }
 
+// Write then rename, so a reader never sees a partial marker. The temporary
+// name is fixed so a drop can always clean it up after an interruption.
 function writeMarker(paths, now) {
-  const temporary = `${paths.marker}.${process.pid}.tmp`;
-  fs.writeFileSync(temporary, `${now}\n`);
-  fs.renameSync(temporary, paths.marker);
+  fs.writeFileSync(paths.markerTemporary, `${now}\n`);
+  fs.renameSync(paths.markerTemporary, paths.marker);
 }
 
 // Cold path, after the normal restore and install: move the workspace store
@@ -304,9 +319,8 @@ export function resolvePersistentCorepackHome({ paths, corepackHome = '', manage
 // persistent store, e.g. `.pnpm-store/v10` to `<root>/pnpm-store/v10`.
 export function relocateStorePath({ discoveredStorePath, workspaceStore, persistentStore }) {
   if (!discoveredStorePath) return persistentStore;
-  const relative = path.relative(path.resolve(workspaceStore), path.resolve(discoveredStorePath));
-  if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+  if (!isPathWithin(path.resolve(workspaceStore), path.resolve(discoveredStorePath))) {
     return persistentStore;
   }
-  return path.join(persistentStore, relative);
+  return path.join(persistentStore, path.relative(path.resolve(workspaceStore), path.resolve(discoveredStorePath)));
 }

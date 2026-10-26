@@ -900,14 +900,15 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      # Every invocation below shares one root under RUNNER_TEMP, which is
-      # outside the workspace and lives for the whole job.
+      # Every invocation below shares one root beside the workspace, outside
+      # checkout's reach. (RUNNER_TEMP would work within one job, but the action
+      # warns about it because a self-hosted runner empties it between jobs.)
       - name: Choose the persistent root
         uses: actions/github-script@v8
         with:
           script: |
             const path = require('path');
-            core.exportVariable('PERSISTENT_ROOT', path.join(process.env.RUNNER_TEMP, 'persistent-store'));
+            core.exportVariable('PERSISTENT_ROOT', path.join(path.dirname(process.env.GITHUB_WORKSPACE), 'persistent-store'));
 
       - name: Cold run seeds the store from a cache miss
         id: cold

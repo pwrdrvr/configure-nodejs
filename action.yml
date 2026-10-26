@@ -228,7 +228,9 @@ runs:
           const { pathToFileURL } = require('url');
           const {
             checkPersistentStore,
+            describePersistentStoreCheck,
             isPersistentStoreEnabled,
+            isUnderRunnerTemp,
             normalizeMaxAgeDays,
             persistentStorePaths,
             resolvePersistentCorepackHome,
@@ -259,25 +261,16 @@ runs:
             workspace: process.env.GITHUB_WORKSPACE,
             home: require('os').homedir(),
           });
+          if (isUnderRunnerTemp({ root, runnerTemp: process.env.RUNNER_TEMP ?? '' })) {
+            core.warning(`persistent-store-dir "${root}" is under RUNNER_TEMP, which the runner empties before every job, so the store will never be warm.`);
+          }
           const paths = persistentStorePaths(root);
           const result = checkPersistentStore({
             paths,
             now: Math.floor(Date.now() / 1000),
             maxAgeDays,
           });
-
-          const messages = {
-            warm: `Persistent pnpm store is warm (seeded ${Math.floor((result.ageSeconds ?? 0) / 3600)} h ago); skipping the dependency cache restore: ${paths.store}`,
-            missing: `No persistent pnpm store at ${paths.store}; seeding it from the dependency cache.`,
-            unreadable: 'Persistent pnpm store seed marker is unreadable; dropped the store to re-seed it.',
-            future: 'Persistent pnpm store seed marker is dated in the future; dropped the store to re-seed it.',
-            expired: `Persistent pnpm store expired (seeded ${Math.floor((result.ageSeconds ?? 0) / 86400)} d ago, limit ${maxAgeDays} d); dropped it to re-seed from the current lockfile.`,
-          };
-          core.info(
-            result.reason === 'missing' && result.dropped
-              ? `Persistent pnpm store at ${paths.store} has no seed marker; dropped it to re-seed it.`
-              : messages[result.reason],
-          );
+          core.info(describePersistentStoreCheck(result, { paths, maxAgeDays }));
 
           const corepack = resolvePersistentCorepackHome({
             paths,
@@ -307,6 +300,9 @@ runs:
               [process.env.CONFIGURE_NODEJS_INSTALL_EXECUTABLE, ...installArguments].join(' '),
             );
           }
+          // Dropping an expired store can take seconds; keep it out of the
+          // setup-node timing that a floating Node.js spec measures from here.
+          core.setOutput('setupNodeStartedAt', Date.now());
 
     # The dependency cache key has to carry the Node.js major that will actually
     # run the restored tree, because NODE_MODULE_VERSION -- and therefore the ABI
@@ -352,7 +348,7 @@ runs:
         CONFIGURE_NODEJS_PACKAGE_MANAGER: ${{ steps.resolve-package-manager.outputs.packageManager }}
         CONFIGURE_NODEJS_NODE_VERSION: ${{ inputs.node-version }}
         CONFIGURE_NODEJS_INSTALLED_NODE_VERSION: ${{ steps.setup-node-floating.outputs.node-version }}
-        CONFIGURE_NODEJS_SETUP_NODE_STARTED_AT: ${{ steps.resolve-package-manager.outputs.setupNodeStartedAt }}
+        CONFIGURE_NODEJS_SETUP_NODE_STARTED_AT: ${{ steps.persistent-store.outputs.setupNodeStartedAt || steps.resolve-package-manager.outputs.setupNodeStartedAt }}
       with:
         script: |
           const path = require('path');

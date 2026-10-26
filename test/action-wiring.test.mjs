@@ -502,6 +502,10 @@ test('the seed runs after the cache save and the check before any restore', () =
   assert.match(stepBlock('install-dependencies').lines.join('\n'), /CONFIGURE_NODEJS_INSTALL_ARGUMENTS: \$\{\{ steps\.persistent-store\.outputs\.installArguments \|\| steps\.resolve-package-manager\.outputs\.installArguments \}\}/);
   assert.match(actionYaml, /  persistent-store-dir:\r?\n    description: .*\r?\n    default: ""/);
   assert.match(actionYaml, /  persistent-store-max-age-days:\r?\n    description: .*\r?\n    default: "14"/);
+  assert.match(
+    stepBlock('resolve-dependency-cache-paths').lines.join('\n'),
+    /CONFIGURE_NODEJS_SETUP_NODE_STARTED_AT: \$\{\{ steps\.persistent-store\.outputs\.setupNodeStartedAt \|\| steps\.resolve-package-manager\.outputs\.setupNodeStartedAt \}\}/,
+  );
 });
 
 function persistentEnv(overrides = {}) {
@@ -543,7 +547,7 @@ test('executed check step: disabled by default, warm and cold when enabled', asy
 
   const disabled = recordingCore();
   await run(disabled.core, createRequire(import.meta.url), { env: persistentEnv({ CONFIGURE_NODEJS_PERSISTENT_STORE_DIR: '', GITHUB_WORKSPACE: workspace }) });
-  assert.deepEqual(disabled.outputs, { warm: 'false', enabled: 'false' });
+  assert.deepEqual(disabled.outputs, { warm: 'false', enabled: 'false' }, 'default mode leaves the timing source unchanged');
   assert.deepEqual(disabled.exports, {});
 
   const cold = recordingCore();
@@ -553,6 +557,8 @@ test('executed check step: disabled by default, warm and cold when enabled', asy
   assert.equal(cold.outputs.installArguments, undefined, 'a cold store installs into the workspace store');
   assert.equal(cold.exports.COREPACK_HOME, path.join(root, 'corepack'));
 
+  assert.ok(cold.outputs.setupNodeStartedAt, 'the floating setup-node timing starts after the check');
+  fs.mkdirSync(path.join(root, 'pnpm-store'));
   fs.writeFileSync(path.join(root, '.configure-nodejs-seeded'), String(Math.floor(Date.now() / 1000) - 3600));
   const warm = recordingCore();
   await run(warm.core, createRequire(import.meta.url), { env: persistentEnv({ CONFIGURE_NODEJS_PERSISTENT_STORE_DIR: root, GITHUB_WORKSPACE: workspace, COREPACK_HOME: '/caller/corepack' }) });

@@ -386,7 +386,7 @@ The action owns these entries under the root, and creates or deletes nothing els
 | Store state | What runs |
 | --- | --- |
 | **Warm**: marker present, readable, not future-dated, younger than `persistent-store-max-age-days` | No dependency cache restore and no save. `actions/setup-node`, Corepack activation with an explicit check that `pnpm --version` matches `package.json#packageManager`, then `pnpm install --frozen-lockfile --store-dir <root>/pnpm-store`. Packages missing from the store still come from the registry |
-| **Cold**: marker missing, unreadable, future-dated, or expired | Drop the store and its caches, then run exactly as in default mode: restore the dependency cache into the workspace, install, and save on a miss, so the cache entry stays shared with default-mode jobs. Then move the workspace store and Electron caches under the root, write the marker last, and point the job's environment at the moved paths |
+| **Cold**: marker missing, unreadable, future-dated, or expired, or `pnpm-store/` itself is gone | Drop the store and its caches, then run exactly as in default mode: restore the dependency cache into the workspace, install, and save on a miss, so the cache entry stays shared with default-mode jobs. Then move the workspace store and Electron caches under the root, write the marker last, and point the job's environment at the moved paths |
 
 If the install fails against a warm store, the action removes the marker before failing, so the next job re-seeds instead of failing until the store expires. Expiry also bounds growth: a re-seeded store holds only what the current lockfile's cache and install put there.
 
@@ -394,6 +394,7 @@ Requirements and limits:
 
 - pnpm only, with an exact `package.json#packageManager` pin. Corepack checks a pin's hash only when it downloads; a copy already in the persistent `COREPACK_HOME` runs unchecked, which is why the activated version is checked against the pin. Dropping the store also drops the Corepack home, so the download (and its hash check) repeats at least once per expiry period.
 - Cannot be combined with `lookup-only` or `dependency-cache: node-modules`; the action fails if you try.
+- Choose a root the runner keeps between jobs. The action warns about a root under `RUNNER_TEMP`, which the runner empties before every job.
 - The root must be an absolute path. It cannot be a filesystem root, your home directory or one of its ancestors, the workspace, inside it, or one of its ancestors. Symbolic links are resolved before these checks, and a symbolic link in place of a managed entry fails the job rather than being followed.
 - Keep the root on the same volume as the workspace. The move is then a rename, and pnpm can hardlink or clone from the store; across volumes the move falls back to a copy, and pnpm has to copy every file into `node_modules`.
 - The store is shared across Node.js majors. pnpm keys built side effects by platform, architecture, and Node.js major inside its store, and the Node-major mismatch warning still applies.

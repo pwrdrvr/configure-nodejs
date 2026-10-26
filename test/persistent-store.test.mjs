@@ -7,7 +7,9 @@ import {
   PERSISTENT_STORE_ENTRIES,
   SEED_MARKER_NAME,
   checkPersistentStore,
+  describePersistentStoreCheck,
   invalidatePersistentStore,
+  isUnderRunnerTemp,
   isPersistentStoreEnabled,
   moveDirectory,
   normalizeMaxAgeDays,
@@ -41,11 +43,12 @@ function populate(paths, { marker } = {}) {
   }
   fs.mkdirSync(path.join(paths.root, 'pnpm-store.incoming'), { recursive: true });
   fs.writeFileSync(path.join(paths.root, 'unrelated.txt'), 'not ours');
+  fs.writeFileSync(paths.markerTemporary, 'interrupted write');
   if (marker !== undefined) fs.writeFileSync(paths.marker, marker);
 }
 
 function managedEntriesPresent(paths) {
-  return [...Object.values(PERSISTENT_STORE_ENTRIES), 'pnpm-store.incoming', SEED_MARKER_NAME]
+  return [...Object.values(PERSISTENT_STORE_ENTRIES), 'pnpm-store.incoming', SEED_MARKER_NAME, `${SEED_MARKER_NAME}.tmp`]
     .filter((name) => fs.existsSync(path.join(paths.root, name)));
 }
 
@@ -168,7 +171,7 @@ test('a warm store is kept as is', (t) => {
   populate(paths, { marker: `${NOW - DAY}` });
   const result = checkPersistentStore({ paths, now: NOW, maxAgeDays: 14 });
   assert.deepEqual({ warm: result.warm, reason: result.reason, dropped: result.dropped }, { warm: true, reason: 'warm', dropped: false });
-  assert.equal(managedEntriesPresent(paths).length, 6);
+  assert.equal(managedEntriesPresent(paths).length, 7);
 });
 
 test('cold markers drop every managed entry and nothing else', (t) => {
@@ -187,6 +190,37 @@ test('cold markers drop every managed entry and nothing else', (t) => {
     assert.deepEqual(managedEntriesPresent(paths), [], reason);
     assert.equal(fs.readFileSync(path.join(paths.root, 'unrelated.txt'), 'utf8'), 'not ours');
   }
+});
+
+test('a marker whose store was deleted re-seeds instead of installing from the registry', (t) => {
+  const { base } = sandbox(t);
+  const paths = persistentStorePaths(path.join(base, 'cache'));
+  fs.mkdirSync(path.join(paths.corepack, 'pnpm'), { recursive: true });
+  fs.writeFileSync(paths.marker, `${NOW - DAY}`);
+  const result = checkPersistentStore({ paths, now: NOW, maxAgeDays: 14 });
+  assert.deepEqual({ warm: result.warm, reason: result.reason, dropped: result.dropped }, { warm: false, reason: 'incomplete', dropped: true });
+  assert.deepEqual(managedEntriesPresent(paths), []);
+});
+
+test('every check result has a status message', (t) => {
+  const { base } = sandbox(t);
+  const paths = persistentStorePaths(path.join(base, 'cache'));
+  for (const reason of ['warm', 'missing', 'incomplete', 'unreadable', 'future', 'expired']) {
+    for (const dropped of [true, false]) {
+      assert.match(describePersistentStoreCheck({ reason, dropped, ageSeconds: 3 * DAY }, { paths, maxAgeDays: 14 }), /\S/);
+    }
+  }
+  assert.match(describePersistentStoreCheck({ reason: 'missing', dropped: true }, { paths, maxAgeDays: 14 }), /no seed marker/);
+  assert.match(describePersistentStoreCheck({ reason: 'expired', ageSeconds: 15 * DAY }, { paths, maxAgeDays: 14 }), /15 d ago, limit 14 d/);
+  assert.throws(() => describePersistentStoreCheck({ reason: 'other' }, { paths, maxAgeDays: 14 }), /Unknown/);
+});
+
+test('a root under RUNNER_TEMP is flagged because it never survives a job', (t) => {
+  const { base } = sandbox(t);
+  const runnerTemp = path.join(base, 'work', '_temp');
+  assert.equal(isUnderRunnerTemp({ root: path.join(runnerTemp, 'store'), runnerTemp }), true);
+  assert.equal(isUnderRunnerTemp({ root: path.join(base, 'cache'), runnerTemp }), false);
+  assert.equal(isUnderRunnerTemp({ root: path.join(runnerTemp, 'store') }), false);
 });
 
 test('a first run creates the root and reports nothing dropped', (t) => {
@@ -242,6 +276,7 @@ test('seeding moves the workspace store and caches, then writes the marker last'
   assert.deepEqual(result, { seeded: true, moved: ['store', 'electron', 'prebuild'] });
   assert.equal(renames.length, 6, 'each entry moves through a temporary name');
   assert.equal(fs.readFileSync(paths.marker, 'utf8').trim(), String(NOW));
+  assert.equal(fs.existsSync(paths.markerTemporary), false);
   for (const [source, destination] of [[caches.store, paths.store], [caches.electron, paths.electron], [caches.prebuild, paths.prebuild]]) {
     assert.equal(fs.existsSync(source), false);
     assert.ok(fs.existsSync(path.join(destination, path.basename(source) === '.pnpm-store' ? 'v10' : '', 'payload')));
