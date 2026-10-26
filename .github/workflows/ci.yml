@@ -887,16 +887,19 @@ jobs:
             assert.equal(process.env.SAVE_MS, '0');
 
   persistent-store:
-    name: Persistent pnpm store (${{ matrix.os }})
+    name: Persistent pnpm store (${{ matrix.os }}, ${{ matrix.fixture }})
     needs: unit
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
+        fixture: [pnpm-basic, pnpm12-basic]
     env:
-      FIXTURE: fixtures/pnpm-basic
-      SUFFIX: persistent-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.os }}
+      FIXTURE: fixtures/${{ matrix.fixture }}
+      # Only pnpm-basic's postinstall writes into the Electron caches.
+      EXPECT_ELECTRON_MARKERS: ${{ matrix.fixture == 'pnpm-basic' }}
+      SUFFIX: persistent-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.os }}-${{ matrix.fixture }}
     steps:
       - uses: actions/checkout@v6
 
@@ -945,8 +948,10 @@ jobs:
             assert.ok(inRoot(process.env.STORE_PATH), process.env.STORE_PATH);
             assert.ok(inRoot(process.env.PNPM_CONFIG_STORE_DIR));
             assert.ok(inRoot(process.env.COREPACK_HOME));
-            assert.ok(fs.existsSync(path.join(root, 'electron', 'electron-runtime.marker')));
-            assert.ok(fs.existsSync(path.join(root, 'npm', '_prebuilds', 'native-abi.marker')));
+            if (process.env.EXPECT_ELECTRON_MARKERS === 'true') {
+              assert.ok(fs.existsSync(path.join(root, 'electron', 'electron-runtime.marker')));
+              assert.ok(fs.existsSync(path.join(root, 'npm', '_prebuilds', 'native-abi.marker')));
+            }
             assert.equal(path.resolve(process.env.electron_config_cache), path.join(root, 'electron'));
             core.exportVariable('SEEDED_AT', fs.readFileSync(path.join(root, '.configure-nodejs-seeded'), 'utf8'));
 
