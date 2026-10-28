@@ -400,7 +400,7 @@ test('executed strict prepare rejects misses and major/ABI mismatch without depe
       CONFIGURE_NODEJS_CACHE_KEY: 'exact-key',
       CONFIGURE_NODEJS_NEEDS_COREPACK: 'true',
     };
-    fs.writeFileSync(path.join(cwd, '.cache/configure-nodejs/completed-tree.json'), JSON.stringify({ key: 'exact-key', nodeMajor: 24, nodeABI: scenario === 'abi' ? '999' : '137' }));
+    fs.writeFileSync(path.join(cwd, '.cache/configure-nodejs/completed-tree.json'), JSON.stringify({ key: 'exact-key', nodeMajor: 24, nodeABI: scenario === 'abi' ? '999' : '137', directoryLinks: [] }));
     const calls = [];
     const outputs = {};
     const core = { setOutput: (key, value) => { outputs[key] = value; }, exportVariable: () => {}, info: () => {} };
