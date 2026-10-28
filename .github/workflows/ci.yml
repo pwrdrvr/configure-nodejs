@@ -885,3 +885,237 @@ jobs:
             assert.equal(fs.existsSync(process.env.LIFECYCLE_LOG), false);
             assert.equal(process.env.INSTALL_MS, '0');
             assert.equal(process.env.SAVE_MS, '0');
+
+  persistent-store:
+    name: Persistent pnpm store (${{ matrix.os }}, ${{ matrix.fixture }})
+    needs: unit
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        fixture: [pnpm-basic, pnpm12-basic]
+    env:
+      FIXTURE: fixtures/${{ matrix.fixture }}
+      # Only pnpm-basic's postinstall writes into the Electron caches.
+      EXPECT_ELECTRON_MARKERS: ${{ matrix.fixture == 'pnpm-basic' }}
+      SUFFIX: persistent-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.os }}-${{ matrix.fixture }}
+    steps:
+      - uses: actions/checkout@v6
+
+      # Every invocation below shares one root beside the workspace, outside
+      # checkout's reach. (RUNNER_TEMP would work within one job, but the action
+      # warns about it because a self-hosted runner empties it between jobs.)
+      - name: Choose the persistent root
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const path = require('path');
+            core.exportVariable('PERSISTENT_ROOT', path.join(path.dirname(process.env.GITHUB_WORKSPACE), 'persistent-store'));
+
+      - name: Cold run seeds the store from a cache miss
+        id: cold
+        uses: ./
+        with:
+          node-version: 24.14.1
+          working-directory: ${{ env.FIXTURE }}
+          cache-key-suffix: ${{ env.SUFFIX }}
+          cache-electron: "true"
+          persistent-store-dir: ${{ env.PERSISTENT_ROOT }}
+
+      - name: Validate the cold seed
+        uses: actions/github-script@v8
+        env:
+          WARM: ${{ steps.cold.outputs.persistent-store-warm }}
+          CACHE_HIT: ${{ steps.cold.outputs.cache-hit }}
+          STORE_PATH: ${{ steps.cold.outputs.pnpm-store-path }}
+        with:
+          script: |
+            const assert = require('assert/strict');
+            const fs = require('fs');
+            const path = require('path');
+            const root = fs.realpathSync(process.env.PERSISTENT_ROOT);
+            const fixture = path.join(process.env.GITHUB_WORKSPACE, process.env.FIXTURE);
+            const inRoot = (value) => {
+              const relative = path.relative(root, fs.realpathSync(value));
+              return relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+            };
+            assert.equal(process.env.WARM, 'false');
+            assert.notEqual(process.env.CACHE_HIT, 'true');
+            assert.match(fs.readFileSync(path.join(root, '.configure-nodejs-seeded'), 'utf8'), /^\d+\n$/);
+            assert.ok(fs.existsSync(path.join(root, 'pnpm-store')));
+            assert.equal(fs.existsSync(path.join(fixture, '.pnpm-store')), false, 'the workspace store moved out');
+            assert.ok(inRoot(process.env.STORE_PATH), process.env.STORE_PATH);
+            assert.ok(inRoot(process.env.PNPM_CONFIG_STORE_DIR));
+            assert.ok(inRoot(process.env.COREPACK_HOME));
+            if (process.env.EXPECT_ELECTRON_MARKERS === 'true') {
+              assert.ok(fs.existsSync(path.join(root, 'electron', 'electron-runtime.marker')));
+              assert.ok(fs.existsSync(path.join(root, 'npm', '_prebuilds', 'native-abi.marker')));
+            }
+            assert.equal(path.resolve(process.env.electron_config_cache), path.join(root, 'electron'));
+            core.exportVariable('SEEDED_AT', fs.readFileSync(path.join(root, '.configure-nodejs-seeded'), 'utf8'));
+
+      - name: Validate the cold install
+        working-directory: ${{ env.FIXTURE }}
+        run: node check.mjs
+
+      # Stand-in for checkout's `git clean -ffdx` at the start of the next job.
+      # Corepack must now run from the persistent home without the network.
+      - name: Clean the workspace as checkout would
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const fixture = path.join(process.env.GITHUB_WORKSPACE, process.env.FIXTURE);
+            for (const name of ['node_modules', '.pnpm-store', '.cache']) {
+              fs.rmSync(path.join(fixture, name), { recursive: true, force: true });
+            }
+            core.exportVariable('COREPACK_ENABLE_NETWORK', '0');
+
+      - name: Warm run skips the dependency cache
+        id: warm
+        uses: ./
+        with:
+          node-version: 24.14.1
+          working-directory: ${{ env.FIXTURE }}
+          cache-key-suffix: ${{ env.SUFFIX }}
+          cache-electron: "true"
+          persistent-store-dir: ${{ env.PERSISTENT_ROOT }}
+
+      - name: Validate the warm run
+        uses: actions/github-script@v8
+        env:
+          WARM: ${{ steps.warm.outputs.persistent-store-warm }}
+          CACHE_HIT: ${{ steps.warm.outputs.cache-hit }}
+          STORE_PATH: ${{ steps.warm.outputs.pnpm-store-path }}
+          INSTALL_COMMAND: ${{ steps.warm.outputs.install-command }}
+          INSTALL_MS: ${{ steps.warm.outputs.install-duration-ms }}
+          SAVE_MS: ${{ steps.warm.outputs.cache-save-duration-ms }}
+        with:
+          script: |
+            const assert = require('assert/strict');
+            const fs = require('fs');
+            const path = require('path');
+            const root = fs.realpathSync(process.env.PERSISTENT_ROOT);
+            const fixture = path.join(process.env.GITHUB_WORKSPACE, process.env.FIXTURE);
+            assert.equal(process.env.WARM, 'true');
+            assert.equal(process.env.CACHE_HIT, '', 'the dependency cache restore must not run');
+            assert.equal(process.env.SAVE_MS, '0');
+            assert.ok(Number(process.env.INSTALL_MS) > 0);
+            assert.ok(process.env.INSTALL_COMMAND.includes(path.join(root, 'pnpm-store')), process.env.INSTALL_COMMAND);
+            const relativeStore = path.relative(root, fs.realpathSync(process.env.STORE_PATH));
+            assert.ok(!relativeStore.startsWith('..') && !path.isAbsolute(relativeStore), process.env.STORE_PATH);
+            assert.equal(fs.existsSync(path.join(fixture, '.pnpm-store')), false);
+            assert.equal(fs.readFileSync(path.join(root, '.configure-nodejs-seeded'), 'utf8'), process.env.SEEDED_AT);
+            core.exportVariable('COREPACK_ENABLE_NETWORK', '1');
+
+      - name: Validate the warm install
+        working-directory: ${{ env.FIXTURE }}
+        run: node check.mjs
+
+      - name: Break the lockfile so the warm install fails
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const file = path.join(process.env.GITHUB_WORKSPACE, process.env.FIXTURE, 'package.json');
+            const manifest = JSON.parse(fs.readFileSync(file, 'utf8'));
+            manifest.dependencies['is-number'] = '7.0.0';
+            fs.writeFileSync(file, JSON.stringify(manifest, null, 2));
+
+      - name: Failed warm install
+        id: failed
+        continue-on-error: true
+        uses: ./
+        with:
+          node-version: 24.14.1
+          working-directory: ${{ env.FIXTURE }}
+          cache-key-suffix: ${{ env.SUFFIX }}
+          cache-electron: "true"
+          persistent-store-dir: ${{ env.PERSISTENT_ROOT }}
+
+      - name: Validate the failed install dropped the marker
+        uses: actions/github-script@v8
+        env:
+          OUTCOME: ${{ steps.failed.outcome }}
+        with:
+          script: |
+            const assert = require('assert/strict');
+            const fs = require('fs');
+            const path = require('path');
+            assert.equal(process.env.OUTCOME, 'failure');
+            assert.equal(fs.existsSync(path.join(process.env.PERSISTENT_ROOT, '.configure-nodejs-seeded')), false);
+            await exec.exec('git', ['checkout', '--', path.join(process.env.FIXTURE, 'package.json')]);
+
+      - name: Re-seed from the saved cache entry
+        id: reseed
+        uses: ./
+        with:
+          node-version: 24.14.1
+          working-directory: ${{ env.FIXTURE }}
+          cache-key-suffix: ${{ env.SUFFIX }}
+          cache-electron: "true"
+          persistent-store-dir: ${{ env.PERSISTENT_ROOT }}
+
+      - name: Validate the re-seed restored the shared cache entry, then expire it
+        uses: actions/github-script@v8
+        env:
+          WARM: ${{ steps.reseed.outputs.persistent-store-warm }}
+          CACHE_HIT: ${{ steps.reseed.outputs.cache-hit }}
+        with:
+          script: |
+            const assert = require('assert/strict');
+            const fs = require('fs');
+            const path = require('path');
+            const marker = path.join(process.env.PERSISTENT_ROOT, '.configure-nodejs-seeded');
+            assert.equal(process.env.WARM, 'false');
+            assert.equal(process.env.CACHE_HIT, 'true');
+            assert.ok(fs.existsSync(marker));
+            fs.writeFileSync(marker, `${Math.floor(Date.now() / 1000) - 15 * 86400}\n`);
+
+      - name: Expired store re-seeds
+        id: expired
+        uses: ./
+        with:
+          node-version: 24.14.1
+          working-directory: ${{ env.FIXTURE }}
+          cache-key-suffix: ${{ env.SUFFIX }}
+          cache-electron: "true"
+          persistent-store-dir: ${{ env.PERSISTENT_ROOT }}
+
+      - name: Validate the expired store was re-seeded
+        uses: actions/github-script@v8
+        env:
+          WARM: ${{ steps.expired.outputs.persistent-store-warm }}
+        with:
+          script: |
+            const assert = require('assert/strict');
+            const fs = require('fs');
+            const path = require('path');
+            const seededAt = Number(fs.readFileSync(path.join(process.env.PERSISTENT_ROOT, '.configure-nodejs-seeded'), 'utf8'));
+            assert.equal(process.env.WARM, 'false');
+            assert.ok(Date.now() / 1000 - seededAt < 3600);
+
+      - name: Reject a root inside the workspace
+        id: inside
+        continue-on-error: true
+        uses: ./
+        with:
+          node-version: 24.14.1
+          working-directory: ${{ env.FIXTURE }}
+          cache-key-suffix: ${{ env.SUFFIX }}
+          persistent-store-dir: ${{ github.workspace }}/persistent-store
+
+      - name: Validate the path guard failed the action
+        uses: actions/github-script@v8
+        env:
+          OUTCOME: ${{ steps.inside.outcome }}
+        with:
+          script: |
+            const assert = require('assert/strict');
+            const fs = require('fs');
+            const path = require('path');
+            assert.equal(process.env.OUTCOME, 'failure');
+            assert.equal(fs.existsSync(path.join(process.env.GITHUB_WORKSPACE, 'persistent-store')), false);

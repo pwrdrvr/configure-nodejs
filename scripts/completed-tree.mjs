@@ -4,6 +4,8 @@ import path from 'node:path';
 import { assertPathWithinDirectory } from './resolve-cache-paths.mjs';
 
 export const METADATA_PATH = '.cache/configure-nodejs/completed-tree.json';
+// An exact pnpm version, optionally with Corepack's integrity hash.
+export const EXACT_PNPM_PIN = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+sha\d+\.[0-9a-f]+)?$/;
 
 export function validateCacheMode({ dependencyCache = 'default', cacheMode = 'auto', lookupOnly = 'false', packageManager, packageManagerVersion }) {
   if (!['default', 'node-modules'].includes(dependencyCache)) {
@@ -15,7 +17,7 @@ export function validateCacheMode({ dependencyCache = 'default', cacheMode = 'au
   }
   if (!['populate', 'restore'].includes(cacheMode)) throw new Error('Completed trees require explicit cache-mode: populate or restore.');
   if (lookupOnly !== 'false') throw new Error('Completed trees use cache-mode instead of lookup-only.');
-  if (packageManager && (packageManager !== 'pnpm' || !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+sha\d+\.[0-9a-f]+)?$/.test(packageManagerVersion))) {
+  if (packageManager && (packageManager !== 'pnpm' || !EXACT_PNPM_PIN.test(packageManagerVersion))) {
     throw new Error('Completed trees require an exact pnpm pin in package.json#packageManager.');
   }
 }

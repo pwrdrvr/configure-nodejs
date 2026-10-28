@@ -139,7 +139,7 @@ export function buildElectronCachePaths(workingDirectory) {
   ];
 }
 
-function isPathWithin(boundaryPath, candidatePath, allowEqual = true) {
+export function isPathWithin(boundaryPath, candidatePath, allowEqual = true) {
   const relativePath = path.relative(boundaryPath, candidatePath);
   return (
     (allowEqual || relativePath !== '') &&
@@ -149,7 +149,7 @@ function isPathWithin(boundaryPath, candidatePath, allowEqual = true) {
   );
 }
 
-function findNearestExistingPath(candidatePath) {
+export function findNearestExistingPath(candidatePath) {
   let currentPath = candidatePath;
 
   while (true) {
