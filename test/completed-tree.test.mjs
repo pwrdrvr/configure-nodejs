@@ -6,7 +6,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { installationInputsHash, buildCompletedKey, validateCacheMode, completePopulation, verifyCompletedTree, removeMaterializedDependencies, METADATA_PATH } from '../scripts/completed-tree.mjs';
 import { shouldInstallDependencies, shouldDiscardRestoredDependencies } from '../scripts/resolve-node-version.mjs';
-import { buildResult } from '../scripts/resolve-cache-paths.mjs';
+import { buildCachePaths, buildResult } from '../scripts/resolve-cache-paths.mjs';
 import { hasCacheableDependencyPath } from '../scripts/detect-cache-paths.mjs';
 
 function fixture(t) {
@@ -95,6 +95,8 @@ test('default store paths and namespace remain distinct from completed trees', (
   assert.equal(defaults.cacheKeyPrefix, 'pnpm-store');
   assert.equal(completed.primaryCachePath, 'node_modules');
   assert.ok(completed.cachePaths.includes(METADATA_PATH));
+  assert.ok(completed.cachePaths.includes('!**/node_modules/**/node_modules'));
+  assert.ok(buildCachePaths('packages/app', 'pnpm', [], 'node-modules').includes('!packages/app/**/node_modules/**/node_modules'));
   assert.ok(!completed.cachePaths.includes('.pnpm-store'));
 });
 

@@ -229,6 +229,10 @@ export function buildCachePaths(
     return [
       `${base}node_modules`,
       `${base}**/node_modules`,
+      // actions/cache follows directory symlinks while expanding these globs.
+      // Archive each workspace root recursively once; nested matches can name
+      // pnpm files through aliases and produce unextractable tar hard links.
+      `!${base}**/node_modules/**/node_modules`,
       `${base}.cache/configure-nodejs/completed-tree.json`,
       ...electronCachePaths,
     ];

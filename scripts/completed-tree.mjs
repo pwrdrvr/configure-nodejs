@@ -102,6 +102,71 @@ export function verifyCompletedTree({ cwd, key, nodeMajor, nodeABI }) {
     throw new Error('Incompatible completed dependency tree key, Node major or ABI; installation/repair is forbidden.');
   }
   if (!fs.existsSync(path.join(cwd, 'node_modules/.pnpm'))) throw new Error('Completed pnpm dependency tree is missing its virtual store.');
+  if (process.platform === 'win32') restoreDirectoryLinks({ cwd, links: metadata.directoryLinks });
+}
+
+export function collectDirectoryLinks(cwd) {
+  cwd = fs.realpathSync(cwd);
+  const links = [];
+  const visit = (directory, dependencies = false) => {
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      const file = path.join(directory, entry.name);
+      if (entry.isSymbolicLink() && dependencies && fs.statSync(file).isDirectory()) {
+        const target = fs.realpathSync(file);
+        assertPathWithinDirectory({ boundaryPath: cwd, candidatePath: target, description: 'Completed directory-link target' });
+        links.push({ path: path.relative(cwd, file).split(path.sep).join('/'), target: path.relative(cwd, target).split(path.sep).join('/') });
+      } else if (entry.isDirectory() && !['.git', '.pnpm-store', '.cache'].includes(entry.name)) {
+        visit(file, dependencies || entry.name === 'node_modules');
+      }
+    }
+  };
+  visit(cwd);
+  return links.sort((a, b) => a.path.localeCompare(b.path));
+}
+
+// GNU tar on Windows can restore a directory alias as a file symlink when its
+// target appears later in the archive. Its text is correct, but stat returns
+// EPERM. Rehydrate only directory links recorded by the producer, after key/ABI
+// validation; never install packages or infer/repair missing dependency edges.
+export function restoreDirectoryLinks({ cwd, links, filesystem = fs }) {
+  cwd = filesystem.realpathSync(cwd);
+  if (!Array.isArray(links)) throw new Error('Completed tree directory-link metadata is missing.');
+  const seen = new Set();
+  const operations = links.map((link) => {
+    if (!link || typeof link.path !== 'string' || typeof link.target !== 'string' ||
+        path.isAbsolute(link.path) || path.isAbsolute(link.target) ||
+        !link.path.split('/').includes('node_modules') || seen.has(link.path)) {
+      throw new Error('Invalid completed directory-link metadata.');
+    }
+    seen.add(link.path);
+    const file = path.resolve(cwd, link.path);
+    const target = path.resolve(cwd, link.target);
+    const relative = path.relative(cwd, file);
+    if (!relative || relative === '..' || relative.startsWith(`..${path.sep}`)) throw new Error('Completed directory-link path escapes the workspace.');
+    assertPathWithinDirectory({ boundaryPath: cwd, candidatePath: path.dirname(file), description: 'Completed directory-link parent' });
+    assertPathWithinDirectory({ boundaryPath: cwd, candidatePath: target, description: 'Completed directory-link target' });
+    if (!filesystem.lstatSync(file).isSymbolicLink() || !filesystem.statSync(target).isDirectory()) {
+      throw new Error('Completed directory-link source or target is incompatible.');
+    }
+    const expected = path.toNamespacedPath(filesystem.realpathSync(target));
+    const actual = path.toNamespacedPath(filesystem.realpathSync(path.resolve(path.dirname(file), filesystem.readlinkSync(file))));
+    if (actual !== expected) throw new Error('Completed directory-link target changed.');
+    try {
+      if (!filesystem.statSync(file).isDirectory()) throw new Error('Completed directory-link does not reference a directory.');
+      return null;
+    } catch (error) {
+      if (!['EPERM', 'ENOENT'].includes(error.code)) throw error;
+      return { file, target };
+    }
+  });
+  // Validate every entry before changing any restored link.
+  for (const operation of operations.filter(Boolean)) {
+    filesystem.unlinkSync(operation.file);
+    filesystem.symlinkSync(path.relative(path.dirname(operation.file), operation.target), operation.file, 'junction');
+    if (!filesystem.statSync(operation.file).isDirectory() || path.toNamespacedPath(filesystem.realpathSync(operation.file)) !== path.toNamespacedPath(filesystem.realpathSync(operation.target))) {
+      throw new Error('Completed directory-link restoration failed.');
+    }
+  }
 }
 
 export function completePopulation({ cwd, key, nodeMajor, nodeABI, lockfilePath, lockfileSha, inputsHash, cacheInputs = '', repositoryRoot = cwd }) {
@@ -113,6 +178,6 @@ export function completePopulation({ cwd, key, nodeMajor, nodeABI, lockfilePath,
   const metadataPath = path.join(cwd, METADATA_PATH);
   assertPathWithinDirectory({ boundaryPath: cwd, candidatePath: metadataPath, description: 'Completed tree metadata' });
   fs.mkdirSync(path.dirname(metadataPath), { recursive: true });
-  fs.writeFileSync(metadataPath, JSON.stringify({ key, nodeMajor: Number(nodeMajor), nodeABI: String(nodeABI), lockfileSha }));
+  fs.writeFileSync(metadataPath, JSON.stringify({ key, nodeMajor: Number(nodeMajor), nodeABI: String(nodeABI), lockfileSha, directoryLinks: collectDirectoryLinks(cwd) }));
   verifyCompletedTree({ cwd, key, nodeMajor, nodeABI });
 }
