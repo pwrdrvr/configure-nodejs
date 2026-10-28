@@ -1,5 +1,8 @@
+import { seedArchiveProbe } from '../cache-archive-probe.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
+
+seedArchiveProbe();
 
 if (process.env.LIFECYCLE_LOG) fs.appendFileSync(process.env.LIFECYCLE_LOG, 'postinstall\n');
 

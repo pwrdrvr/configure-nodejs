@@ -1,3 +1,4 @@
+import { checkArchiveProbe } from '../cache-archive-probe.mjs';
 import pc from 'picocolors';
 
 if (typeof pc.green !== 'function') {
@@ -5,3 +6,5 @@ if (typeof pc.green !== 'function') {
 }
 
 console.log(pc.green('pnpm fixture dependency loaded'));
+
+checkArchiveProbe();
